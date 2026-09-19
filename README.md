@@ -234,7 +234,7 @@ bot_spada/
 │   ├── session.json    # Session SPADA + BIMA
 │   ├── bima_cookies.json  # Cookie BIMA
 │   └── tugas_tracker.json # Tracker tugas lokal
-├── .env                # Credentials (jangan di-commit!)
+├── .env                # Credentials 
 ├── .env.example        # Template .env
 ├── .gitignore          # File yang di-exclude dari git
 ├── requirements.txt    # Python dependencies
