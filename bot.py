@@ -165,43 +165,49 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_credentials(username, password)
         _scraper = scraper
 
-        # ── Validate against BIMA ────────────────────────────
+        # ── Validate against BIMA (optional) ──────────────────
         await update.message.reply_text("🔍 Validasi ke BIMA…")
+        bima_ok = False
         try:
             bima = BimaScraper(username, password)
-            if not await bima.login():
-                await update.message.reply_text(
-                    "❌ Kredensial tidak valid di BIMA!\n"
-                    "Login dibatalkan.",
-                )
-                clear_credentials()
-                _scraper = None
-                return ConversationHandler.END
-
-            # ── BIMA semester (more accurate) ────────────────
-            await update.message.reply_text("🔍 Mendeteksi semester dari BIMA…")
-            bima_info = await bima.get_semester_info()
-            if bima_info and bima_info.get("semester_name"):
-                bima_sem = bima_info["semester_name"]
-                save_bima_semester(bima_sem)
-                await update.message.reply_text(
-                    f"🎓 *Semester BIMA:* {bima_sem}",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-
-            # ── BIMA enrolled courses (source of truth) ─────
-            await update.message.reply_text("🔍 Memindai mata kuliah dari BIMA…")
-            bima_courses = await bima.get_courses()
-            if bima_courses:
-                save_bima_courses(bima_courses)
-                await update.message.reply_text(
-                    f"📚 *{len(bima_courses)} mata kuliah aktif dari BIMA.*",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
+            if bima.login():
+                bima_ok = True
+                logger.info("BIMA login successful")
+            else:
+                logger.warning("BIMA login failed (reCAPTCHA challenge?), continuing without BIMA")
         except Exception as e:
-            logger.warning(f"BIMA validation failed: {e}")
+            logger.warning(f"BIMA login error: {e}")
+
+        if bima_ok:
+            # ── BIMA semester (more accurate) ────────────────
+            try:
+                await update.message.reply_text("🔍 Mendeteksi semester dari BIMA…")
+                bima_info = bima.get_semester_info()
+                if bima_info and bima_info.get("semester_name"):
+                    bima_sem = bima_info["semester_name"]
+                    save_bima_semester(bima_sem)
+                    await update.message.reply_text(
+                        f"🎓 *Semester BIMA:* {bima_sem}",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+
+                # ── BIMA enrolled courses (source of truth) ─────
+                await update.message.reply_text("🔍 Memindai mata kuliah dari BIMA…")
+                bima_courses = bima.get_courses()
+                if bima_courses:
+                    save_bima_courses(bima_courses)
+                    await update.message.reply_text(
+                        f"📚 *{len(bima_courses)} mata kuliah aktif dari BIMA.*",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+            except Exception as e:
+                logger.warning(f"BIMA scrape failed: {e}")
+                await update.message.reply_text(
+                    "⚠️ Gagal memindai BIMA. Lanjut dengan SPADA saja.",
+                )
+        else:
             await update.message.reply_text(
-                "⚠️ BIMA tidak bisa diakses. Lanjut dengan SPADA saja.",
+                "⚠️ BIMA tidak bisa diakses (reCAPTCHA). Lanjut dengan SPADA saja.",
             )
 
         # ── Auto-detect semester (SPADA) ─────────────────────
@@ -224,11 +230,15 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("⚠️ Tidak ditemukan presensi otomatis.")
 
+        # ── Get student name ──────────────────────────────────
+        student_name = scraper.get_student_name()
+
         # ── Summary ───────────────────────────────────────────
         courses = scraper.get_courses(semester=sem)
+        greeting_name = student_name if student_name else username
         await update.message.reply_text(
             f"✅ *Login berhasil!*\n\n"
-            f"👤 {username}\n"
+            f"👋 Halo, *{greeting_name}*!\n"
             f"🎓 Semester: {sem}\n"
             f"📚 {len(courses)} mata kuliah\n"
             f"📋 {len(amap)} presensi terdeteksi\n\n"
@@ -946,7 +956,7 @@ async def cmd_semester(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from store import get_credentials
             u, p = get_credentials()
             bima = BimaScraper(u, p)
-            info = await bima.get_semester_info()
+            info = bima.get_semester_info()
             if info and info.get("semester_name"):
                 sem_bima = info["semester_name"]
                 save_bima_semester(sem_bima)

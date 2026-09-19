@@ -57,7 +57,7 @@ Telegram bot untuk mengelola kuliah di SPADA WIMAYA (UPNYK). Fitur lengkap mulai
 | **Telegram Bot Token** | Dari [@BotFather](https://t.me/BotFather) |
 | **Telegram Chat ID** | Dari [@userinfobot](https://t.me/userinfobot) |
 | **Akun SPADA** | NIM dan password SPADA UPNYK |
-| **Playwright + Chromium** | Untuk scraping BIMA (login otomatis) |
+| **DrissionPage + Chromium** | Untuk scraping BIMA (login otomatis, anti reCAPTCHA) |
 
 ---
 
@@ -78,8 +78,7 @@ source venv/bin/activate  # Linux/Mac
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Install Playwright Chromium
-playwright install chromium
+# 4. Install dependencies sudah termasuk DrissionPage (otomatis install Chromium)
 
 # 5. Buat file .env
 cp .env.example .env
@@ -225,7 +224,7 @@ Semua data (jadwal, deadline, tugas, absen) **di-filter berdasarkan mata kuliah 
 ```
 bot_spada/
 ├── bot.py              # Telegram bot (main entry point)
-├── bima.py             # BIMA scraper (Playwright + reCAPTCHA)
+├── bima.py             # BIMA scraper (DrissionPage CDP stealth + reCAPTCHA)
 ├── spada.py            # SPADA scraper (requests + BeautifulSoup)
 ├── config.py           # Konfigurasi dari .env + store.py
 ├── store.py            # Penyimpanan session (data/session.json)
@@ -272,13 +271,15 @@ python bot.py
 2. Pastikan attendance map sudah terisi (lihat `/absen` tanpa argumen)
 3. Cek apakah jadwal sudah benar di `data/session.json`
 
-### Playwright error
+### DrissionPage error
+
+DrissionPage menggunakan Chromium secara langsung via CDP (Chrome DevTools Protocol). Jika terjadi error:
 
 ```bash
-# Install ulang Chromium
-playwright install chromium
+# Pastikan Chromium terinstall
+which chromium || sudo apt-get install -y chromium
 
-# Atau install dependencies system (Ubuntu)
+# Install dependencies system (Ubuntu)
 sudo apt-get install -y libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
   libcups2 libdrm2 libdbus-1-3 libxkbcommon0 libatspi2.0-0 \
   libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 \
@@ -311,7 +312,7 @@ A: Ketik `/logout` lalu `/login` lagi dengan credential baru.
 - Bot berjalan 24/7 di GCP Free Tier (Always Free)
 - Auto-restart saat crash (systemd)
 - File `data/session.json` menyimpan session agar bot tidak perlu login ulang setiap restart
-- BIMA menggunakan Playwright untuk bypass reCAPTCHA v2
+- BIMA menggunakan DrissionPage (CDP stealth) untuk bypass reCAPTCHA v2
 - Screenshot bukti absen disimpan di folder `screenshots/` (otomatis dihapus setelah dikirim)
 
 ---

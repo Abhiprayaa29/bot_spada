@@ -65,14 +65,19 @@ class SpadaScraper:
                 verify=False,
             )
 
-            if "Masuk" in resp.text and "Anda belum masuk" in resp.text:
-                self.logged_in = False
-                return False
+            # Positive check: if we landed on /my/ or /dashboard/, login succeeded
+            if "/login" not in resp.url:
+                self.logged_in = True
+                print(f"[SPADA] Login successful (redirected to {resp.url})")
+                return True
 
-            self.logged_in = True
-            return True
+            # Negative check: still on login page = failure
+            self.logged_in = False
+            print(f"[SPADA] Login failed — still on login page: {resp.url}")
+            return False
         except Exception as e:
             print(f"[SPADA] Login error: {e}")
+            self.logged_in = False
             return False
 
     def _ensure_login(self):
@@ -89,6 +94,49 @@ class SpadaScraper:
     def _clean_course_name(name: str) -> str:
         """Remove semester code from course name. 'Kriptografi IF-E (20261)' → 'Kriptografi'."""
         return re.sub(r'\s+IF-[A-Z]\s+\(\d{5}\)\s*$', '', name).strip()
+
+    def get_student_name(self) -> str:
+        """Get the logged-in student's full name from the SPADA dashboard."""
+        self._ensure_login()
+        try:
+            resp = self.session.get(f"{self.base_url}/my/", verify=False)
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Pattern 1: Moodle user menu (most reliable)
+            user_menu = soup.select_one(".usermenu, .navbar .dropdown .dropdown-toggle")
+            if user_menu:
+                # The user's name is often in an img alt or span
+                img = user_menu.select_one("img")
+                if img and img.get("alt"):
+                    name = img["alt"].strip()
+                    if name and len(name) > 2:
+                        return name
+                # Or in a span
+                span = user_menu.select_one("span")
+                if span:
+                    name = span.get_text(strip=True)
+                    if name and len(name) > 2:
+                        return name
+
+            # Pattern 2: user greeting
+            greeting = soup.select_one(".page-header-headings, h1, .userprofile")
+            if greeting:
+                text = greeting.get_text(strip=True)
+                # "Dashboard: Nama Lengkap" or "Profil: Nama Lengkap"
+                if ":" in text:
+                    return text.split(":", 1)[1].strip()
+
+            # Pattern 3: profile link text
+            profile_link = soup.select_one("a[href*='user/profile.php']")
+            if profile_link:
+                name = profile_link.get_text(strip=True)
+                if name and len(name) > 2:
+                    return name
+
+            return ""
+        except Exception as e:
+            print(f"[SPADA] Error getting student name: {e}")
+            return ""
 
     def get_courses(self, semester: str = "") -> list[dict]:
         """Get enrolled courses.

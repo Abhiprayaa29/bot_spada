@@ -1,180 +1,217 @@
-"""BIMA Scraper — Playwright-based login with reCAPTCHA v2 bypass.
+"""BIMA Scraper — DrissionPage-based login with reCAPTCHA v2 bypass.
 
 Handles https://bima.upnyk.ac.id/login which has:
   - Laravel CSRF token
   - reCAPTCHA v2 (sitekey: 6LekiE0sAAAAABv_pEjSv8h_B6WNnz8BTlqe7AYZ)
   - Same credentials as SPADA
 
-Strategy:
-  1. Launch Playwright chromium (headless, stealth)
-  2. Load login page, extract CSRF token
-  3. Fill credentials, click reCAPTCHA checkbox
-  4. Wait for reCAPTCHA to resolve (no challenge for clean sessions)
-  5. Submit form, save cookies for reuse
-  6. Scrape semester info from dashboard
-
-If reCAPTCHA shows an image challenge, we retry with stealth tweaks.
-If it consistently blocks, the user needs a CAPTCHA solving service.
+Strategy (DrissionPage):
+  - Uses Chrome DevTools Protocol (CDP) directly — no WebDriver fingerprint
+  - DrissionPage's ChromiumPage is much harder for reCAPTCHA to detect
+  - Adds human-like delays, random scrolling, realistic mouse patterns
+  - Falls back gracefully if reCAPTCHA challenge appears
+  - Saves cookies for session reuse across restarts
 """
 
 import os
+import re
 import json
-import asyncio
+import time
+import random
 import logging
 from typing import Optional
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+
+from DrissionPage import ChromiumPage, ChromiumOptions
 
 logger = logging.getLogger(__name__)
 
 BIMA_BASE_URL = "https://bima.upnyk.ac.id"
 BIMA_LOGIN_URL = f"{BIMA_BASE_URL}/login"
-RECAPTCHA_SITEKEY = "6LekiE0sAAAAABv_pEjSv8h_B6WNnz8BTlqe7AYZ"
 COOKIE_FILE = os.path.join(os.path.dirname(__file__), "data", "bima_cookies.json")
 
 
 class BimaScraper:
-    """Playwright-based BIMA scraper with reCAPTCHA v2 handling."""
+    """DrissionPage-based BIMA scraper with reCAPTCHA v2 handling."""
 
     def __init__(self, username: str, password: str):
         self.username = username
         self.password = password
         self.logged_in = False
-        self._pw = None
-        self._browser: Optional[Browser] = None
-        self._context: Optional[BrowserContext] = None
-        self._page: Optional[Page] = None
+        self._page: Optional[ChromiumPage] = None
 
     def _ensure_dir(self):
         os.makedirs(os.path.dirname(COOKIE_FILE), exist_ok=True)
 
-    async def _save_cookies(self):
+    def _save_cookies(self):
         """Persist cookies for session reuse."""
         try:
             self._ensure_dir()
-            cookies = await self._context.cookies()
+            cookies = self._page.cookies()
             with open(COOKIE_FILE, "w") as f:
-                json.dump(cookies, f, indent=2)
+                json.dump(cookies, f, indent=2, default=str)
             logger.info("BIMA cookies saved")
         except Exception as e:
             logger.error(f"Failed to save BIMA cookies: {e}")
 
-    async def _load_cookies(self) -> bool:
+    def _load_cookies(self) -> bool:
         """Load previously saved cookies."""
         if not os.path.exists(COOKIE_FILE):
             return False
         try:
             with open(COOKIE_FILE, "r") as f:
                 cookies = json.load(f)
-            await self._context.add_cookies(cookies)
+            # Check if cookies are expired (older than 24 hours)
+            for cookie in cookies:
+                if "expiry" in cookie:
+                    if cookie["expiry"] < time.time():
+                        logger.info("BIMA cookies expired")
+                        return False
+            for cookie in cookies:
+                self._page.cookies(cookie)
             logger.info("Loaded BIMA cookies from disk")
             return True
         except Exception as e:
             logger.warning(f"Failed to load BIMA cookies: {e}")
             return False
 
-    async def _start_browser(self):
-        """Launch Playwright chromium with stealth settings."""
-        self._pw = await async_playwright().start()
-        self._browser = await self._pw.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-            ],
-        )
-        self._context = await self._browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            locale="id-ID",
-        )
-        # Remove webdriver property to avoid detection
-        await self._context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            window.chrome = { runtime: {} };
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5],
-            });
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['id-ID', 'id', 'en-US', 'en'],
-            });
-        """)
-        self._page = await self._context.new_page()
+    def _start_browser(self):
+        """Launch Chromium via DrissionPage CDP with stealth settings."""
+        try:
+            co = ChromiumOptions()
+            co.headless()
+            co.set_argument("--no-sandbox")
+            co.set_argument("--disable-dev-shm-usage")
+            co.set_argument("--disable-gpu")
+            co.set_argument("--disable-blink-features=AutomationControlled")
+            co.set_argument("--disable-infobars")
+            co.set_argument("--window-size=1280,800")
+            co.set_argument("--lang=id-ID")
+            co.set_user_agent(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            )
+            # Use a fresh profile to avoid residual automation flags
+            co.set_user_data_path("/tmp/bima_chrome_profile")
 
-    async def _stop_browser(self):
+            self._page = ChromiumPage(co)
+            logger.info("DrissionPage Chromium started")
+        except Exception as e:
+            logger.error(f"Failed to start browser: {e}")
+            raise
+
+    def _stop_browser(self):
         """Clean up browser resources."""
         try:
-            if self._browser:
-                await self._browser.close()
-            if self._pw:
-                await self._pw.stop()
+            if self._page:
+                self._page.quit()
         except Exception:
             pass
-        self._pw = None
-        self._browser = None
-        self._context = None
         self._page = None
 
-    async def _solve_recaptcha(self, page: Page) -> bool:
-        """Attempt to click the reCAPTCHA checkbox.
+    def _human_delay(self, min_s=0.5, max_s=2.0):
+        """Random human-like delay."""
+        time.sleep(random.uniform(min_s, max_s))
 
-        reCAPTCHA v2 uses an iframe. We need to:
-        1. Find the reCAPTCHA iframe
-        2. Click the checkbox inside it
-        3. Wait for it to resolve (no challenge)
+    def _human_type(self, element, text: str):
+        """Type text character by character with random delays (human-like)."""
+        for char in text:
+            element.input(char)
+            time.sleep(random.uniform(0.05, 0.15))
+
+    def _human_scroll(self):
+        """Random small scroll to simulate human behavior."""
+        scroll_amount = random.randint(50, 200)
+        self._page.scroll.down(scroll_amount)
+        self._human_delay(0.3, 0.8)
+
+    def _solve_recaptcha(self) -> bool:
+        """Attempt to solve reCAPTCHA v2 using DrissionPage.
+
+        DrissionPage uses CDP directly (not WebDriver), so reCAPTCHA
+        is much less likely to detect automation. The checkbox click
+        often passes without showing a challenge.
 
         Returns True if solved, False if challenge appeared.
         """
         try:
             # Wait for reCAPTCHA iframe to load
-            recaptcha_frame = page.frame_locator("iframe[src*='recaptcha']")
-            checkbox = recaptcha_frame.locator("#recaptcha-anchor")
+            self._human_delay(1, 2)
 
-            # Wait for checkbox to be visible
-            await checkbox.wait_for(state="visible", timeout=10000)
+            # Find the reCAPTCHA iframe via CDP
+            # DrissionPage can access iframe content directly
+            recaptcha_iframe = self._page.get_frame("recaptcha")
+
+            if recaptcha_iframe is None:
+                # Try finding by src pattern
+                iframes = self._page.get_frames()
+                recaptcha_iframe = None
+                for frame in iframes:
+                    src = frame.attr("src") or ""
+                    if "recaptcha" in src and "api2/anchor" in src:
+                        recaptcha_iframe = frame
+                        break
+
+            if recaptcha_iframe is None:
+                logger.warning("reCAPTCHA iframe not found")
+                return False
 
             # Click the checkbox
-            await checkbox.click()
-            logger.info("Clicked reCAPTCHA checkbox")
+            checkbox = recaptcha_iframe.ele("id:recaptcha-anchor", timeout=5)
+            if checkbox:
+                self._human_delay(0.5, 1)
+                checkbox.click()
+                logger.info("Clicked reCAPTCHA checkbox")
 
-            # Wait a bit for reCAPTCHA to process
-            await asyncio.sleep(3)
+                # Wait for reCAPTCHA to process
+                self._human_delay(3, 5)
 
-            # Check if reCAPTCHA was solved (the checkbox should be checked)
-            try:
-                await page.frame_locator("iframe[src*='recaptcha']").locator(
-                    ".recaptcha-checkbox-checked"
-                ).wait_for(state="visible", timeout=5000)
-                logger.info("reCAPTCHA solved (checkbox checked)")
-                return True
-            except Exception:
-                # Check if challenge iframe appeared
-                challenge = page.frame_locator("iframe[src*='recaptcha/api2/bframe']")
+                # Check if solved (checkbox gets checked class)
                 try:
-                    await challenge.locator(".rc-imageselect-desc-no-canonical").wait_for(
-                        state="visible", timeout=3000
-                    )
-                    logger.warning("reCAPTCHA challenge appeared — cannot auto-solve")
-                    return False
+                    anchor = recaptcha_iframe.ele("id:recaptcha-anchor", timeout=3)
+                    if anchor:
+                        aria = anchor.attr("aria-checked") or ""
+                        if aria == "true":
+                            logger.info("reCAPTCHA solved (checkbox checked)")
+                            return True
                 except Exception:
-                    # No challenge either — might still be solved
-                    logger.info("No challenge detected, proceeding")
-                    return True
+                    pass
+
+                # Check if challenge appeared
+                challenge_frame = None
+                for frame in self._page.get_frames():
+                    src = frame.attr("src") or ""
+                    if "recaptcha" in src and "api2/bframe" in src:
+                        challenge_frame = frame
+                        break
+
+                if challenge_frame:
+                    try:
+                        challenge_frame.ele("css:.rc-imageselect-desc-no-canonical", timeout=3)
+                        logger.warning("reCAPTCHA challenge appeared — cannot auto-solve")
+                        return False
+                    except Exception:
+                        pass
+
+                # No challenge detected — might be solved or processing
+                logger.info("No challenge detected, proceeding")
+                return True
+            else:
+                logger.warning("reCAPTCHA checkbox not found")
+                return False
 
         except Exception as e:
             logger.error(f"reCAPTCHA interaction failed: {e}")
             return False
 
-    async def login(self) -> bool:
+    def login(self) -> bool:
         """Login to BIMA with reCAPTCHA v2 handling."""
         try:
-            await self._start_browser()
+            self._start_browser()
 
             # Try loading saved cookies first
-            if await self._load_cookies():
-                await self._page.goto(BIMA_BASE_URL)
-                await asyncio.sleep(2)
+            if self._load_cookies():
+                self._page.get(BIMA_BASE_URL)
+                self._human_delay(2, 3)
                 if "/login" not in self._page.url:
                     logger.info("BIMA session restored from cookies")
                     self.logged_in = True
@@ -182,55 +219,84 @@ class BimaScraper:
                 logger.info("BIMA cookies expired, logging in again")
 
             # Load login page
-            await self._page.goto(BIMA_LOGIN_URL, wait_until="networkidle")
-            await asyncio.sleep(1)
+            self._page.get(BIMA_LOGIN_URL)
+            self._human_delay(2, 3)
+
+            # Human-like scroll
+            self._human_scroll()
 
             # Extract CSRF token
-            csrf_token = await self._page.locator('input[name="_token"]').input_value()
+            csrf_input = self._page.ele("name:_token", timeout=5)
+            csrf_token = csrf_input.val if csrf_input else ""
             logger.info(f"Got CSRF token: {csrf_token[:10]}...")
 
-            # Fill credentials
-            await self._page.fill('input[name="username"]', self.username)
-            await self._page.fill('input[name="password"]', self.password)
-            logger.info("Filled credentials")
+            # Fill credentials with human-like typing
+            username_input = self._page.ele("name:username", timeout=5)
+            password_input = self._page.ele("name:password", timeout=5)
+
+            if username_input and password_input:
+                username_input.click()
+                self._human_delay(0.3, 0.5)
+                self._human_type(username_input, self.username)
+
+                self._human_delay(0.5, 1)
+
+                password_input.click()
+                self._human_delay(0.3, 0.5)
+                self._human_type(password_input, self.password)
+
+                logger.info("Filled credentials")
+            else:
+                logger.error("Login form inputs not found")
+                return False
+
+            # Small delay before reCAPTCHA
+            self._human_delay(1, 2)
 
             # Solve reCAPTCHA
-            recaptcha_solved = await self._solve_recaptcha(self._page)
+            recaptcha_solved = self._solve_recaptcha()
             if not recaptcha_solved:
                 logger.warning("reCAPTCHA not solved, trying to submit anyway")
-                # Sometimes it works even without visual confirmation
+
+            # Human delay before submit
+            self._human_delay(0.5, 1)
 
             # Click submit button
-            await self._page.click('button[type="submit"], input[type="submit"], .btn-primary')
-            logger.info("Clicked submit")
+            submit = self._page.ele("css:button[type='submit'], input[type='submit'], .btn-primary", timeout=5)
+            if submit:
+                submit.click()
+                logger.info("Clicked submit")
+            else:
+                # Fallback: submit form via JS
+                self._page.run_js("document.querySelector('form').submit()")
+                logger.info("Submitted form via JS")
 
             # Wait for navigation
-            await self._page.wait_for_load_state("networkidle")
-            await asyncio.sleep(2)
+            self._human_delay(3, 5)
 
             # Check if login succeeded
             if "/login" in self._page.url:
                 logger.error("Login failed — still on login page")
-                # Check for error messages
                 try:
-                    error = await self._page.locator(".alert-danger, .error, .invalid-feedback").text_content()
-                    logger.error(f"Error message: {error}")
+                    error_el = self._page.ele("css:.alert-danger, .error, .invalid-feedback", timeout=2)
+                    if error_el:
+                        logger.error(f"Error message: {error_el.text}")
                 except Exception:
                     pass
                 return False
 
             logger.info("BIMA login successful!")
             self.logged_in = True
-            await self._save_cookies()
+            self._save_cookies()
             return True
 
         except Exception as e:
             logger.error(f"BIMA login error: {e}")
             return False
         finally:
-            await self._stop_browser()
+            self._stop_browser()
 
-    async def get_semester_info(self) -> Optional[dict]:
+    def get_semester_info(self) -> Optional[dict]:
         """Scrape semester info from BIMA dashboard.
 
         Returns dict with:
@@ -238,36 +304,61 @@ class BimaScraper:
           - semester_id: e.g. "20241"
           - raw_text: full text for debugging
         """
-        page = await self._ensure_page()
-        if page is None:
-            return None
+        if not self.logged_in:
+            if not self.login():
+                return None
 
         try:
-            raw_text = await page.text_content("body") or ""
+            self._start_browser()
+
+            # Load cookies and navigate
+            if self._load_cookies():
+                self._page.get(BIMA_BASE_URL)
+                self._human_delay(2, 3)
+                if "/login" in self._page.url:
+                    self._stop_browser()
+                    self.logged_in = False
+                    if not self.login():
+                        return None
+                    self._start_browser()
+                    if self._load_cookies():
+                        self._page.get(BIMA_BASE_URL)
+                        self._human_delay(2, 3)
+            else:
+                self._stop_browser()
+                self.logged_in = False
+                if not self.login():
+                    return None
+                self._start_browser()
+                if self._load_cookies():
+                    self._page.get(BIMA_BASE_URL)
+                    self._human_delay(2, 3)
+
+            raw_text = self._page.html or ""
             result = {}
 
             # Pattern 1: semester dropdown
             try:
-                semester_select = page.locator('select[name*="semester"], select[name*="periode"], #semester')
-                if await semester_select.count() > 0:
-                    selected = await semester_select.input_value()
-                    result["semester_id"] = selected
-                    selected_text = await page.locator(
-                        f'select option[value="{selected}"]'
-                    ).text_content()
-                    result["semester_name"] = selected_text.strip()
-                    options = await semester_select.locator("option").all()
+                semester_select = self._page.ele("css:select[name*='semester'], select[name*='periode'], #semester", timeout=3)
+                if semester_select:
+                    selected_val = semester_select.val
+                    result["semester_id"] = selected_val
+                    # Get selected option text
+                    selected_option = self._page.ele(f"css:select option[value='{selected_val}']", timeout=2)
+                    if selected_option:
+                        result["semester_name"] = selected_option.text.strip()
+                    # Get all options
+                    options = semester_select.eles("tag:option")
                     result["available_semesters"] = [
-                        {"value": await opt.get_attribute("value"), "text": await opt.text_content()}
+                        {"value": opt.attr("value"), "text": opt.text.strip()}
                         for opt in options
                     ]
-                    logger.info(f"Found semester: {result['semester_name']} (id={selected})")
+                    logger.info(f"Found semester: {result.get('semester_name')} (id={selected_val})")
             except Exception as e:
                 logger.debug(f"No semester dropdown found: {e}")
 
             # Pattern 2: semester text in page
             if not result.get("semester_name"):
-                import re
                 patterns = [
                     r"(?:Semester|Periode)\s*[:\s]*([\d]{4}[\s/\-]?[\d]?[\s]*(?:Ganjil|Genap|Gasal|Gelombang\s*\d))",
                     r"(?:Semester|Periode)\s*[:\s]*([\d]{4}[0-9])",
@@ -284,9 +375,9 @@ class BimaScraper:
             # Pattern 3: active period element
             if not result.get("semester_name"):
                 try:
-                    period_el = page.locator(".period, .semester, .periode, [class*='semester'], [class*='periode']")
-                    if await period_el.count() > 0:
-                        result["semester_name"] = await (await period_el.first.text_content()).strip()
+                    period_el = self._page.ele("css:.period, .semester, .periode, [class*='semester'], [class*='periode']", timeout=3)
+                    if period_el:
+                        result["semester_name"] = period_el.text.strip()
                         logger.info(f"Found period element: {result['semester_name']}")
                 except Exception:
                     pass
@@ -302,41 +393,53 @@ class BimaScraper:
         except Exception as e:
             logger.error(f"BIMA semester scrape error: {e}")
             return None
+        finally:
+            self._stop_browser()
 
-    async def get_courses(self) -> list[dict]:
-        """Scrape enrolled courses from BIMA dashboard for the active semester.
-
-        Returns list of dicts with: name, id (if available).
-        These are the courses the student is currently taking — the source
-        of truth for which semester's material to display.
-        """
-        page = await self._ensure_page()
-        if page is None:
-            return []
+    def get_courses(self) -> list[dict]:
+        """Scrape enrolled courses from BIMA dashboard for the active semester."""
+        if not self.logged_in:
+            if not self.login():
+                return []
 
         try:
-            raw_text = await page.text_content("body") or ""
+            self._start_browser()
+
+            if self._load_cookies():
+                self._page.get(BIMA_BASE_URL)
+                self._human_delay(2, 3)
+            else:
+                self._stop_browser()
+                self.logged_in = False
+                if not self.login():
+                    return []
+                self._start_browser()
+                if self._load_cookies():
+                    self._page.get(BIMA_BASE_URL)
+                    self._human_delay(2, 3)
+
+            raw_text = self._page.html or ""
             courses = []
+            seen = set()
 
             # Strategy 1: look for course cards/links on dashboard
             course_selectors = [
-                "a[href*='course']",
-                ".card a, .panel a",
-                "table a[href*='matkul']",
-                ".list-group-item a",
-                "a[href*='matakuliah']",
-                "[class*='course'] a",
+                "css:a[href*='course']",
+                "css:.card a",
+                "css:.panel a",
+                "css:table a[href*='matkul']",
+                "css:.list-group-item a",
+                "css:a[href*='matakuliah']",
+                "css:[class*='course'] a",
             ]
-            seen = set()
             for sel in course_selectors:
                 try:
-                    links = await page.locator(sel).all()
+                    links = self._page.eles(sel, timeout=2)
                     for link in links:
-                        text = (await link.text_content()).strip()
-                        href = await link.get_attribute("href") or ""
+                        text = link.text.strip()
+                        href = link.attr("href") or ""
                         if text and len(text) > 3 and text not in seen:
                             seen.add(text)
-                            import re
                             cid_match = re.search(r'id[=/](\d+)', href)
                             courses.append({
                                 "name": text,
@@ -347,7 +450,6 @@ class BimaScraper:
 
             # Strategy 2: parse course names from raw text
             if not courses:
-                import re
                 for line in raw_text.split('\n'):
                     line = line.strip()
                     if len(line) > 5 and any(kw in line.lower() for kw in ['praktikum', 'kuliah', 'matakuliah', 'matkul']):
@@ -361,51 +463,14 @@ class BimaScraper:
         except Exception as e:
             logger.error(f"BIMA courses scrape error: {e}")
             return []
-
-    async def _ensure_page(self) -> Optional["Page"]:
-        """Ensure we have a live BIMA page. Handles cookie restore and re-login.
-        Returns the page object, or None on failure."""
-        if not self.logged_in:
-            if not await self.login():
-                return None
-
-        try:
-            await self._start_browser()
-
-            # Load saved cookies
-            if await self._load_cookies():
-                await self._page.goto(BIMA_BASE_URL, wait_until="networkidle")
-                await asyncio.sleep(2)
-                if "/login" in self._page.url:
-                    await self._stop_browser()
-                    self.logged_in = False
-                    if not await self.login():
-                        return None
-                    await self._start_browser()
-                    if await self._load_cookies():
-                        await self._page.goto(BIMA_BASE_URL, wait_until="networkidle")
-                        await asyncio.sleep(2)
-            else:
-                await self._stop_browser()
-                self.logged_in = False
-                if not await self.login():
-                    return None
-                await self._start_browser()
-                if await self._load_cookies():
-                    await self._page.goto(BIMA_BASE_URL, wait_until="networkidle")
-                    await asyncio.sleep(2)
-
-            return self._page
-
-        except Exception as e:
-            logger.error(f"BIMA page setup error: {e}")
-            return None
+        finally:
+            self._stop_browser()
 
 
-async def detect_semester_from_bima(username: str, password: str) -> Optional[str]:
+def detect_semester_from_bima(username: str, password: str) -> Optional[str]:
     """Convenience function: login to BIMA and return current semester name."""
     scraper = BimaScraper(username, password)
-    info = await scraper.get_semester_info()
+    info = scraper.get_semester_info()
     if info and info.get("semester_name"):
         return info["semester_name"]
     return None
