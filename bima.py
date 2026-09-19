@@ -60,15 +60,21 @@ class BimaScraper:
         try:
             with open(COOKIE_FILE, "r") as f:
                 cookies = json.load(f)
+            if not cookies:
+                return False
             # Check if cookies are expired (older than 24 hours)
             for cookie in cookies:
                 if "expiry" in cookie:
                     if cookie["expiry"] < time.time():
                         logger.info("BIMA cookies expired")
                         return False
+            # Navigate to domain first so cookies have a context
+            self._page.get(BIMA_BASE_URL)
+            time.sleep(1)
             for cookie in cookies:
-                self._page.cookies(cookie)
-            logger.info("Loaded BIMA cookies from disk")
+                # DrissionPage set.cookies expects {name, value, domain, path, ...}
+                self._page.set.cookies(cookie)
+            logger.info(f"Loaded {len(cookies)} BIMA cookies from disk")
             return True
         except Exception as e:
             logger.warning(f"Failed to load BIMA cookies: {e}")
@@ -137,67 +143,57 @@ class BimaScraper:
             # Wait for reCAPTCHA iframe to load
             self._human_delay(1, 2)
 
-            # Find the reCAPTCHA iframe via CDP
-            # DrissionPage can access iframe content directly
-            recaptcha_iframe = self._page.get_frame("recaptcha")
+            # Find the reCAPTCHA anchor iframe via CSS selector on the page
+            # DO NOT use get_frame("recaptcha") — returns NoneElement, not None
+            anchor_iframe = self._page.ele(
+                "css:iframe[src*='recaptcha/api2/anchor']", timeout=5
+            )
 
-            if recaptcha_iframe is None:
-                # Try finding by src pattern
-                iframes = self._page.get_frames()
-                recaptcha_iframe = None
-                for frame in iframes:
-                    src = frame.attr("src") or ""
-                    if "recaptcha" in src and "api2/anchor" in src:
-                        recaptcha_iframe = frame
-                        break
-
-            if recaptcha_iframe is None:
-                logger.warning("reCAPTCHA iframe not found")
+            if not anchor_iframe:
+                logger.warning("reCAPTCHA anchor iframe not found")
                 return False
 
-            # Click the checkbox
-            checkbox = recaptcha_iframe.ele("id:recaptcha-anchor", timeout=5)
-            if checkbox:
-                self._human_delay(0.5, 1)
-                checkbox.click()
-                logger.info("Clicked reCAPTCHA checkbox")
+            # Find the checkbox inside the anchor iframe
+            checkbox = anchor_iframe.ele("id:recaptcha-anchor", timeout=5)
+            if not checkbox:
+                logger.warning("reCAPTCHA checkbox not found inside iframe")
+                return False
 
-                # Wait for reCAPTCHA to process
-                self._human_delay(3, 5)
+            self._human_delay(0.5, 1)
+            checkbox.click()
+            logger.info("Clicked reCAPTCHA checkbox")
 
-                # Check if solved (checkbox gets checked class)
+            # Wait for reCAPTCHA to process
+            self._human_delay(3, 5)
+
+            # Check if solved (checkbox gets aria-checked=true)
+            try:
+                anchor = anchor_iframe.ele("id:recaptcha-anchor", timeout=3)
+                if anchor:
+                    aria = anchor.attr("aria-checked") or ""
+                    if aria == "true":
+                        logger.info("reCAPTCHA solved (checkbox checked)")
+                        return True
+            except Exception:
+                pass
+
+            # Check if challenge appeared (bframe iframe)
+            challenge_frame = self._page.ele(
+                "css:iframe[src*='recaptcha/api2/bframe']", timeout=3
+            )
+            if challenge_frame:
                 try:
-                    anchor = recaptcha_iframe.ele("id:recaptcha-anchor", timeout=3)
-                    if anchor:
-                        aria = anchor.attr("aria-checked") or ""
-                        if aria == "true":
-                            logger.info("reCAPTCHA solved (checkbox checked)")
-                            return True
+                    challenge_frame.ele(
+                        "css:.rc-imageselect-desc-no-canonical", timeout=3
+                    )
+                    logger.warning("reCAPTCHA challenge appeared — cannot auto-solve")
+                    return False
                 except Exception:
                     pass
 
-                # Check if challenge appeared
-                challenge_frame = None
-                for frame in self._page.get_frames():
-                    src = frame.attr("src") or ""
-                    if "recaptcha" in src and "api2/bframe" in src:
-                        challenge_frame = frame
-                        break
-
-                if challenge_frame:
-                    try:
-                        challenge_frame.ele("css:.rc-imageselect-desc-no-canonical", timeout=3)
-                        logger.warning("reCAPTCHA challenge appeared — cannot auto-solve")
-                        return False
-                    except Exception:
-                        pass
-
-                # No challenge detected — might be solved or processing
-                logger.info("No challenge detected, proceeding")
-                return True
-            else:
-                logger.warning("reCAPTCHA checkbox not found")
-                return False
+            # No challenge detected — might be solved or still processing
+            logger.info("No challenge detected, proceeding")
+            return True
 
         except Exception as e:
             logger.error(f"reCAPTCHA interaction failed: {e}")
@@ -234,6 +230,19 @@ class BimaScraper:
             username_input = self._page.ele("name:username", timeout=5)
             password_input = self._page.ele("name:password", timeout=5)
 
+            # Try multiple selector strategies for username/password
+            username_input = self._page.ele("name:username", timeout=5)
+            if not username_input:
+                username_input = self._page.ele("css:input#username", timeout=3)
+            if not username_input:
+                username_input = self._page.ele("css:input[name='username']", timeout=3)
+
+            password_input = self._page.ele("name:password", timeout=5)
+            if not password_input:
+                password_input = self._page.ele("css:input#password", timeout=3)
+            if not password_input:
+                password_input = self._page.ele("css:input[name='password']", timeout=3)
+
             if username_input and password_input:
                 username_input.click()
                 self._human_delay(0.3, 0.5)
@@ -247,7 +256,18 @@ class BimaScraper:
 
                 logger.info("Filled credentials")
             else:
+                # Debug: dump page state
                 logger.error("Login form inputs not found")
+                logger.error(f"  URL: {self._page.url}")
+                all_inputs = self._page.eles("tag:input")
+                logger.error(f"  Total inputs on page: {len(all_inputs)}")
+                for inp in all_inputs:
+                    logger.error(f"    name={inp.attr('name')} type={inp.attr('type')} id={inp.attr('id')}")
+                try:
+                    self._page.get_screenshot(path="/tmp/bima_form_debug.png", full_page=True)
+                    logger.error("  Screenshot saved to /tmp/bima_form_debug.png")
+                except Exception:
+                    pass
                 return False
 
             # Small delay before reCAPTCHA
