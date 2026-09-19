@@ -130,6 +130,19 @@ class BimaScraper:
         self._page.scroll.down(scroll_amount)
         self._human_delay(0.3, 0.8)
 
+    def _find_frame(self, url_pattern: str):
+        """Find a DrissionPage frame object by URL pattern.
+
+        page.ele('css:iframe[...]') returns a raw HTML element — you cannot
+        .ele() inside it to access the frame's document.  get_frames()
+        returns frame objects that DO support .ele() for inner content.
+        """
+        for frame in self._page.get_frames():
+            src = frame.attr("src") or ""
+            if url_pattern in src:
+                return frame
+        return None
+
     def _solve_recaptcha(self) -> bool:
         """Attempt to solve reCAPTCHA v2 using DrissionPage.
 
@@ -143,17 +156,15 @@ class BimaScraper:
             # Wait for reCAPTCHA iframe to load
             self._human_delay(1, 2)
 
-            # Find the reCAPTCHA anchor iframe via CSS selector on the page
-            # DO NOT use get_frame("recaptcha") — returns NoneElement, not None
-            anchor_iframe = self._page.ele(
-                "css:iframe[src*='recaptcha/api2/anchor']", timeout=5
-            )
+            # Find the reCAPTCHA anchor iframe via get_frames()
+            # (page.ele returns raw element; get_frames returns frame objects)
+            anchor_iframe = self._find_frame("recaptcha/api2/anchor")
 
             if not anchor_iframe:
                 logger.warning("reCAPTCHA anchor iframe not found")
                 return False
 
-            # Find the checkbox inside the anchor iframe
+            # Find the checkbox inside the anchor frame
             checkbox = anchor_iframe.ele("id:recaptcha-anchor", timeout=5)
             if not checkbox:
                 logger.warning("reCAPTCHA checkbox not found inside iframe")
@@ -177,10 +188,8 @@ class BimaScraper:
             except Exception:
                 pass
 
-            # Check if challenge appeared (bframe iframe)
-            challenge_frame = self._page.ele(
-                "css:iframe[src*='recaptcha/api2/bframe']", timeout=3
-            )
+            # Check if challenge appeared (bframe)
+            challenge_frame = self._find_frame("recaptcha/api2/bframe")
             if challenge_frame:
                 try:
                     challenge_frame.ele(
