@@ -169,7 +169,7 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔍 Validasi ke BIMA…")
         try:
             bima = BimaScraper(username, password)
-            if not bima.login():
+            if not await bima.login():
                 await update.message.reply_text(
                     "❌ Kredensial tidak valid di BIMA!\n"
                     "Login dibatalkan.",
@@ -180,7 +180,7 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # ── BIMA semester (more accurate) ────────────────
             await update.message.reply_text("🔍 Mendeteksi semester dari BIMA…")
-            bima_info = bima.get_semester_info()
+            bima_info = await bima.get_semester_info()
             if bima_info and bima_info.get("semester_name"):
                 bima_sem = bima_info["semester_name"]
                 save_bima_semester(bima_sem)
@@ -191,7 +191,7 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # ── BIMA enrolled courses (source of truth) ─────
             await update.message.reply_text("🔍 Memindai mata kuliah dari BIMA…")
-            bima_courses = bima.get_courses()
+            bima_courses = await bima.get_courses()
             if bima_courses:
                 save_bima_courses(bima_courses)
                 await update.message.reply_text(
@@ -946,7 +946,7 @@ async def cmd_semester(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from store import get_credentials
             u, p = get_credentials()
             bima = BimaScraper(u, p)
-            info = bima.get_semester_info()
+            info = await bima.get_semester_info()
             if info and info.get("semester_name"):
                 sem_bima = info["semester_name"]
                 save_bima_semester(sem_bima)
