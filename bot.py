@@ -217,6 +217,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  /sync — Sync tracker dengan SPADA\n"
         f"  /status — Status bot\n"
         f"  /semester — Info semester aktif\n"
+        f"  /setjadwal — Input jadwal manual\n"
+        f"  /setsemester — Set kode semester\n"
+        f"  /listjadwal — Lihat jadwal tersimpan\n"
         f"  /help — Bantuan\n\n"
         f"*Auto Features:*\n"
         f"  🌅 Daily briefing jam 7 pagi\n"
@@ -244,6 +247,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/sync — Sync tracker\n"
         "/status — Status bot\n"
         "/semester — Info semester aktif\n\n"
+        "*Input Manual:*\n"
+        "/setjadwal — Input jadwal dari SPADA\n"
+        "/setsemester [kode] — Set kode semester\n"
+        "  Contoh: /setsemester 20251\n"
+        "/listjadwal — Lihat jadwal tersimpan\n\n"
         "*Presensi:*\n"
         "/absen [nama_kelas] — Absen manual\n\n"
         "*Upload via Telegram:*\n"
@@ -790,42 +798,237 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# /setjadwal — manual schedule entry
+# /setjadwal — bulk manual schedule paste from SPADA
 # ============================================================
 
-async def cmd_setjadwal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set schedule for a course: /setjadwal Kriptografi Selasa 15:00 16:30"""
-    if not _require_login(update):
-        return
+# Conversation states for /setjadwal
+SETJADWAL_WAITING = 0
 
-    if len(context.args) < 4:
+
+def _parse_schedule_input(text: str) -> list[dict]:
+    """Parse tab-separated schedule blocks pasted from SPADA.
+
+    Expected format per course (tabs between fields):
+        Kode\tNama\tKelas\tSKS\tHari Jam Start - Jam End Ruang\n
+        \nDosen\n\nKehadiran\n
+
+    Returns list of dicts with keys: code, name, kelas, sks, day, start, end, room, dosen.
+    """
+    import re
+
+    courses = []
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].rstrip()
+
+        # Skip blank lines
+        if not line.strip():
+            i += 1
+            continue
+
+        # A header line contains tabs → parse it
+        if "\t" in line:
+            parts = [p.strip() for p in line.split("\t")]
+            # Filter out empty trailing tabs
+            parts = [p for p in parts if p]
+
+            # We need at least: Kode, Nama, Kelas, SKS, Jadwal_text
+            # Some lines may have 5 parts (no schedule yet) or 6+ (schedule inline)
+            if len(parts) < 5:
+                i += 1
+                continue
+
+            code = parts[0]    # e.g. "120210032"
+            name = parts[1]    # e.g. "Kapita Selekta"
+            kelas = parts[2]   # e.g. "IF-A"
+            sks_str = parts[3] # e.g. "2"
+            jadwal_text = parts[4]  # e.g. "Sabtu 07:30 - 09:15 Patt.I-3A"
+
+            sks = int(sks_str) if sks_str.isdigit() else 0
+
+            # Parse the schedule line: "Hari HH:MM - HH:MM Ruang"
+            day = ""
+            start_time = ""
+            end_time = ""
+            room = ""
+
+            if jadwal_text:
+                # Pattern: Day HH:MM - HH:MM Room
+                m = re.match(
+                    r"(\w+)\s+(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*(.*)",
+                    jadwal_text,
+                )
+                if m:
+                    day = m.group(1).capitalize()
+                    start_time = m.group(2)
+                    end_time = m.group(3)
+                    room = m.group(4).strip()
+
+            # Collect dosen lines (non-blank lines until next tab-line or end)
+            dosen_parts = []
+            i += 1
+            while i < len(lines):
+                next_line = lines[i].rstrip()
+                # Stop at next header (tab-separated) or blank line followed by header
+                if "\t" in next_line and any(
+                    p.strip() for p in next_line.split("\t")[:4]
+                ):
+                    break
+                # Stop at kehadiran number (single digit on its own line)
+                if next_line.strip().isdigit():
+                    i += 1
+                    break
+                if next_line.strip():
+                    dosen_parts.append(next_line.strip())
+                i += 1
+
+            dosen = ", ".join(dosen_parts) if dosen_parts else ""
+
+            courses.append({
+                "code": code,
+                "name": name,
+                "kelas": kelas,
+                "sks": sks,
+                "day": day,
+                "start": start_time,
+                "end": end_time,
+                "room": room,
+                "dosen": dosen,
+            })
+        else:
+            i += 1
+
+    return courses
+
+
+async def cmd_setjadwal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bulk schedule input: /setjadwal then paste the tab-separated blocks.
+
+    Accepts multi-line paste from SPADA's kehadiran page. Each course block
+    is separated by blank lines. Fields are tab-separated:
+        Kode  Nama  Kelas  SKS  Hari Start - End Ruang
+        Dosen
+        Kehadiran
+    """
+    if len(context.args) == 0:
+        # Show help / usage
         await update.message.reply_text(
-            "📅 *Cara Pakai:*\n\n"
-            "/setjadwal [nama_kelas] [hari] [jam_mulai] [jam_selesai]\n\n"
-            "*Contoh:*\n"
-            "  /setjadwal Kriptografi Selasa 15:00 16:30\n"
-            "  /setjadwal IoT Rabu 15:00 16:30",
-            parse_mode=ParseMode.MARKDOWN,
+            "📅 *Input Jadwal Manual (Bulk)*\n\n"
+            "Cara pakai:\n"
+            "1. Buka halaman Kehadiran di SPADA\n"
+            "2. Copy semua jadwal (tabs included)\n"
+            "3. Kirim ke bot dengan format:\n\n"
+            "<code>/setjadwal</code>\n"
+            "<i>lalu paste jadwal di baris berikutnya</i>\n\n"
+            "Atau langsung:\n"
+            "<code>/setjadwal [paste jadwal di sini]</code>\n\n"
+            "*Contoh format yang diterima:*\n"
+            "<code>120210032\tKapita Selekta\tIF-A\t2\t"
+            "Sabtu 07:30 - 09:15 Patt.I-3A</code>\n"
+            "<code>Awang Hendrianto P.</code>\n"
+            "<code>0</code>",
+            parse_mode=ParseMode.HTML,
         )
         return
 
-    # Parse args: last 3 are day, start, end; everything before is course name
-    end_time = context.args[-1]
-    start_time = context.args[-2]
-    day = context.args[-3]
-    course_name = " ".join(context.args[:-3])
+    # Join all args as the raw text (user may paste inline)
+    raw_text = " ".join(context.args)
+    courses = _parse_schedule_input(raw_text)
 
-    valid_days = {"Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"}
-    if day.capitalize() not in {d.capitalize() for d in valid_days}:
-        await update.message.reply_text(f"❌ Hari tidak valid: {day}\nContoh: Senin, Selasa, Rabu, dll.")
+    if not courses:
+        await update.message.reply_text(
+            "❌ Tidak bisa parse jadwal.\n\n"
+            "Pastikan format sudah benar (copy langsung dari SPADA).",
+        )
         return
 
-    update_course_schedule_entry(course_name, day.capitalize(), start_time, end_time)
+    # Save all parsed courses
+    schedule = get_course_schedule()
+    for c in courses:
+        schedule[c["name"]] = {
+            "day": c["day"],
+            "start": c["start"],
+            "end": c["end"],
+            "room": c["room"],
+            "code": c["code"],
+            "kelas": c["kelas"],
+            "sks": c["sks"],
+            "dosen": c["dosen"],
+        }
+    save_course_schedule(schedule)
+
+    # Build summary
+    lines = [f"✅ *{len(courses)} jadwal berhasil disimpan!*\n"]
+    for c in courses:
+        lines.append(
+            f"📚 *{c['name']}* ({c['kelas']})\n"
+            f"   📅 {c['day']} {c['start']} - {c['end']} "
+            f"({c['room']})\n"
+            f"   👨‍🏫 {c['dosen']}\n"
+        )
     await update.message.reply_text(
-        f"✅ Jadwal disimpan!\n\n"
-        f"📚 {course_name}\n"
-        f"📅 {day} {start_time} - {end_time}",
+        "\n".join(lines), parse_mode=ParseMode.MARKDOWN,
     )
+
+
+async def cmd_setjadwal_bulk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle multi-line paste: user sends /setjadwal then the paste in next message."""
+    # This is invoked when user sends just /setjadwal (no args)
+    # We store state and wait for next message
+    context.user_data["awaiting_schedule_paste"] = True
+    await update.message.reply_text(
+        "📅 *Kirim jadwal SPADA sekarang!*\n\n"
+        "Paste hasil copy dari halaman Kehadiran SPADA.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def handle_schedule_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the pasted schedule text after /setjadwal."""
+    if not context.user_data.get("awaiting_schedule_paste"):
+        return False  # Not expecting schedule paste
+
+    context.user_data["awaiting_schedule_paste"] = False
+    raw_text = update.message.text
+
+    courses = _parse_schedule_input(raw_text)
+
+    if not courses:
+        await update.message.reply_text(
+            "❌ Tidak bisa parse jadwal.\n\n"
+            "Coba paste ulang dari SPADA, atau gunakan /setjadwal [jadwal].",
+        )
+        return True
+
+    schedule = get_course_schedule()
+    for c in courses:
+        schedule[c["name"]] = {
+            "day": c["day"],
+            "start": c["start"],
+            "end": c["end"],
+            "room": c["room"],
+            "code": c["code"],
+            "kelas": c["kelas"],
+            "sks": c["sks"],
+            "dosen": c["dosen"],
+        }
+    save_course_schedule(schedule)
+
+    lines = [f"✅ *{len(courses)} jadwal berhasil disimpan!*\n"]
+    for c in courses:
+        lines.append(
+            f"📚 *{c['name']}* ({c['kelas']})\n"
+            f"   📅 {c['day']} {c['start']} - {c['end']} "
+            f"({c['room']})\n"
+            f"   👨‍🏫 {c['dosen']}\n"
+        )
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode=ParseMode.MARKDOWN,
+    )
+    return True
 
 
 # ============================================================
@@ -868,6 +1071,74 @@ async def cmd_semester(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "",
         "💡 Ketik `/semester refresh` untuk update dari SPADA.",
     ]
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+# ============================================================
+# /setsemester — set semester manually
+# ============================================================
+
+async def cmd_setsemester(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set semester manually: /setsemester 20251"""
+    if not context.args:
+        await update.message.reply_text(
+            "🎓 *Cara Pakai:*\n\n"
+            "/setsemester [kode_semester]\n\n"
+            "*Contoh:*\n"
+            "  /setsemester 20251\n\n"
+            f"Semester saat ini: *{get_current_semester() or '(kosong)'}*",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    sem = context.args[0].strip()
+    save_current_semester(sem)
+    await update.message.reply_text(
+        f"✅ Semester disimpan: *{sem}*",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+# ============================================================
+# /listjadwal — view all saved schedule entries
+# ============================================================
+
+async def cmd_listjadwal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show all saved schedule entries."""
+    schedule = get_course_schedule()
+    if not schedule:
+        await update.message.reply_text(
+            "📅 Belum ada jadwal tersimpan.\n\n"
+            "Ketik /setjadwal untuk input jadwal.",
+        )
+        return
+
+    sem = get_current_semester() or "—"
+    lines = [f"📅 *Daftar Jadwal* (Semester: {sem})\n"]
+
+    for name, s in schedule.items():
+        day = s.get("day", "?")
+        start = s.get("start", "?")
+        end = s.get("end", "?")
+        room = s.get("room", "")
+        kelas = s.get("kelas", "")
+        dosen = s.get("dosen", "")
+        sks = s.get("sks", "")
+        code = s.get("code", "")
+
+        lines.append(f"*{name}* ({kelas})")
+        if code:
+            lines.append(f"  📋 Kode: {code}")
+        lines.append(f"  📅 {day} {start} - {end}")
+        if room:
+            lines.append(f"  📍 {room}")
+        if sks:
+            lines.append(f"  🎓 SKS: {sks}")
+        if dosen:
+            lines.append(f"  👨‍🏫 {dosen}")
+        lines.append("")
+
+    lines.append(f"Total: *{len(schedule)}* mata kuliah")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
@@ -1114,7 +1385,15 @@ def main():
     app.add_handler(CommandHandler("briefing", cmd_briefing))
     app.add_handler(CommandHandler("sync", cmd_sync))
     app.add_handler(CommandHandler("setjadwal", cmd_setjadwal))
+    app.add_handler(CommandHandler("setsemester", cmd_setsemester))
+    app.add_handler(CommandHandler("listjadwal", cmd_listjadwal))
     app.add_handler(CommandHandler("semester", cmd_semester))
+
+    # Handle schedule paste after /setjadwal (must be before document handler)
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        handle_schedule_paste,
+    ))
 
     # Handle document uploads
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
