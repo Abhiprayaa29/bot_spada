@@ -4,7 +4,7 @@
 # Usage: ~/bin/caddy run --config /home/abdillahabhi/Documents/bot_spada/Caddyfile
 
 # ── Localhost testing (no HTTPS, just reverse proxy) ────────
-:8080 {
+:8081 {
     reverse_proxy localhost:8088
 }
 
