@@ -63,16 +63,9 @@ def read_bima_grades() -> list:
 
 
 def is_bima_connected() -> bool:
-    """Check if BIMA cookies exist and are not expired."""
-    cookies = _read_json(BIMA_COOKIES_FILE, [])
-    if not cookies:
-        return False
-    import time
-    now = time.time()
-    for c in cookies:
-        if c.get("expiry") and c["expiry"] < now:
-            return False
-    return True
+    """Check if BIMA schedule data exists (manual input)."""
+    schedule = _read_json(BIMA_SCHEDULE_FILE, [])
+    return len(schedule) > 0
 
 
 def get_bot_status() -> dict:
