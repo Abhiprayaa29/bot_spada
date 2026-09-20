@@ -215,7 +215,7 @@
             </div>
             <div class="stat-card">
                 <div class="label">Jadwal Hari Ini</div>
-                <div class="value">{{ schedule | length }}</div>
+                <div class="value">{{ schedule_days | length }}</div>
             </div>
             <div class="stat-card">
                 <div class="label">Tugas Pending</div>
@@ -229,31 +229,20 @@
 
         <div class="section">
             <h2>Jadwal</h2>
-            {% if schedule %}
-                {% set days = {} %}
-                {% for name, info in schedule.items() %}
-                    {% set d = info.get('day', '') %}
-                    {% if d not in days %}
-                        {% set _ = days.update({d: []}) %}
-                    {% endif %}
-                    {% set _ = days[d].append((name, info)) %}
-                {% endfor %}
-
-                {% for day_name in ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Minggu'] %}
-                    {% if day_name in days %}
-                    <div class="day-group">
-                        <h3>{{ day_name }}</h3>
-                        {% for name, info in days[day_name] %}
-                        <div class="course-item">
-                            <div>
-                                <strong>{{ name }}</strong>
-                                <div style="font-size:12px;color:var(--text2)">{{ info.get('room', '') }}</div>
-                            </div>
-                            <div class="time">{{ info.get('start', '') }} – {{ info.get('end', '') }}</div>
+            {% if schedule_days %}
+                {% for day_group in schedule_days %}
+                <div class="day-group">
+                    <h3>{{ day_group.day }}</h3>
+                    {% for c in day_group.courses %}
+                    <div class="course-item">
+                        <div>
+                            <strong>{{ c.name }}</strong>
+                            <div style="font-size:12px;color:var(--text2)">{{ c.get('room', '') }}</div>
                         </div>
-                        {% endfor %}
+                        <div class="time">{{ c.get('start', '') }} – {{ c.get('end', '') }}</div>
                     </div>
-                    {% endif %}
+                    {% endfor %}
+                </div>
                 {% endfor %}
             {% else %}
                 <div class="empty">Belum ada jadwal. Gunakan /setjadwal di bot Telegram.</div>

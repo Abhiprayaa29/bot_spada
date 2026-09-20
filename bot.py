@@ -4,6 +4,7 @@ import os
 import asyncio
 import logging
 import tempfile
+import time as _time
 from datetime import datetime, timedelta, time as dtime
 from telegram import Update, Bot, InputFile
 from telegram.ext import (
@@ -1188,6 +1189,111 @@ async def cmd_listjadwal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
+# Photo handler — QR pairing for web dashboard
+# ============================================================
+
+# Rate limiting: max 5 photos per minute per chat
+_photo_rate: dict[int, list[float]] = {}
+_PHOTO_RATE_LIMIT = 5
+_PHOTO_RATE_WINDOW = 60.0
+
+
+def _check_photo_rate(chat_id: int) -> bool:
+    """Return True if within rate limit, False if too many photos."""
+    now = _time.time()
+    timestamps = _photo_rate.get(chat_id, [])
+    timestamps = [t for t in timestamps if now - t < _PHOTO_RATE_WINDOW]
+    if len(timestamps) >= _PHOTO_RATE_LIMIT:
+        _photo_rate[chat_id] = timestamps
+        return False
+    timestamps.append(now)
+    _photo_rate[chat_id] = timestamps
+    return True
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle photo messages — decode QR code for web dashboard pairing."""
+    chat_id = update.effective_chat.id
+
+    # Rate limit
+    if not _check_photo_rate(chat_id):
+        await update.message.reply_text(
+            "Terlalu banyak foto. Coba lagi dalam semenit."
+        )
+        return
+
+    # Lazy import cv2 (heavy)
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        logger.warning("opencv not installed — QR pairing unavailable")
+        return
+
+    from pairing_store import consume_token, is_token_valid, get_token_status
+
+    # Download the photo (use highest resolution)
+    photo = update.message.photo[-1]
+    temp_path = None
+    try:
+        file = await context.bot.get_file(photo.file_id)
+        temp_dir = tempfile.mkdtemp()
+        temp_path = os.path.join(temp_dir, "qr_photo.jpg")
+        await file.download_to_drive(temp_path)
+
+        # Decode QR
+        img = cv2.imread(temp_path)
+        if img is None:
+            await update.message.reply_text("Gagal membaca foto. Kirim ulang.")
+            return
+
+        detector = cv2.QRCodeDetector()
+        data, _, _ = detector.detectAndDecode(img)
+
+        if not data:
+            await update.message.reply_text(
+                "Tidak ada QR code terdeteksi di foto.\n"
+                "Kirim screenshot QR code dari halaman pairing web."
+            )
+            return
+
+        token = data.strip()
+        status = get_token_status(token)
+
+        if status is None or not is_token_valid(token):
+            await update.message.reply_text(
+                "QR tidak dikenali atau sudah kedaluwarsa.\n"
+                "Buka halaman pairing web untuk generate QR baru."
+            )
+            return
+
+        if consume_token(token, chat_id):
+            await update.message.reply_text(
+                "Dashboard berhasil terhubung!\n"
+                "Buka halaman web untuk melihat dashboard."
+            )
+        else:
+            await update.message.reply_text(
+                "QR tidak valid atau sudah dipakai.\n"
+                "Buka halaman pairing web untuk generate QR baru."
+            )
+
+    except Exception as e:
+        logger.error(f"Photo handler error: {e}")
+        await update.message.reply_text(
+            "Gagal memproses foto. Kirim ulang screenshot QR code."
+        )
+    finally:
+        # Cleanup temp file
+        if temp_path and os.path.exists(temp_path):
+            try:
+                import shutil
+                shutil.rmtree(os.path.dirname(temp_path), ignore_errors=True)
+            except Exception:
+                pass
+
+
+# ============================================================
 # Document upload handler
 # ============================================================
 
@@ -1442,6 +1548,9 @@ def main():
 
     # Handle document uploads
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+
+    # Handle photo uploads — QR pairing for web dashboard
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     # ── Job queue for auto tasks ──────────────────────────────
     job_queue = app.job_queue

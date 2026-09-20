@@ -42,32 +42,23 @@
         </div>
     </nav>
     <div class="container">
-        {% if schedule %}
-            {% set days = {} %}
-            {% for name, info in schedule.items() %}
-                {% set d = info.get('day', '') %}
-                {% if d not in days %}{% set _ = days.update({d: []}) %}{% endif %}
-                {% set _ = days[d].append((name, info)) %}
-            {% endfor %}
-
-            {% for day_name in ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Minggu'] %}
-                {% if day_name in days %}
-                <div class="day-group">
-                    <h2>{{ day_name }}</h2>
-                    {% for name, info in days[day_name] %}
-                    <div class="course-card">
-                        <div class="info">
-                            <h3>{{ name }}</h3>
-                            <div class="meta">{{ info.get('dosen', '') }}</div>
-                        </div>
-                        <div class="time">
-                            <div class="hours">{{ info.get('start', '') }} – {{ info.get('end', '') }}</div>
-                            <div class="room">{{ info.get('room', '') }}</div>
-                        </div>
+        {% if schedule_days %}
+            {% for day_group in schedule_days %}
+            <div class="day-group">
+                <h2>{{ day_group.day }}</h2>
+                {% for c in day_group.courses %}
+                <div class="course-card">
+                    <div class="info">
+                        <h3>{{ c.name }}</h3>
+                        <div class="meta">{{ c.get('dosen', '') }}</div>
                     </div>
-                    {% endfor %}
+                    <div class="time">
+                        <div class="hours">{{ c.get('start', '') }} – {{ c.get('end', '') }}</div>
+                        <div class="room">{{ c.get('room', '') }}</div>
+                    </div>
                 </div>
-                {% endif %}
+                {% endfor %}
+            </div>
             {% endfor %}
         {% else %}
             <div class="empty">Belum ada jadwal. Gunakan /setjadwal di bot Telegram.</div>

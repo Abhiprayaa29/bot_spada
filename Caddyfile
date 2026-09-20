@@ -11,8 +11,8 @@
 # Option 2: Use IP address (no HTTPS - for local/internal only)
 # For Telegram Web App, you NEED a domain with HTTPS.
 # This config is for local dev/testing only.
-:8080 {
-    reverse_proxy localhost:8080
+:8088 {
+    reverse_proxy localhost:8088
 }
 
 # Option 3: With a domain (copy this block and replace domain)
