@@ -20,24 +20,26 @@ from pairing_store import (
 
 
 def generate_qr_base64(token: str) -> str:
-    """Generate QR code image for the given token, return base64-encoded PNG."""
+    """Generate QR code image for the given token, return base64-encoded PNG.
+    Uses black/white for maximum OpenCV compatibility."""
     import qrcode
-    qr = qrcode.QRCode(version=1, box_size=8, border=2)
+    qr = qrcode.QRCode(version=1, box_size=10, border=4)
     qr.add_data(token)
     qr.make(fit=True)
-    img = qr.make_image(fill_color="#38bdf8", back_color="#1e293b")
+    img = qr.make_image(fill_color="black", back_color="white")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode()
 
 
 def generate_qr_png(token: str) -> bytes:
-    """Generate QR code image for the given token, return raw PNG bytes."""
+    """Generate QR code image for the given token, return raw PNG bytes.
+    Uses black/white for maximum OpenCV compatibility."""
     import qrcode
-    qr = qrcode.QRCode(version=1, box_size=8, border=2)
+    qr = qrcode.QRCode(version=1, box_size=10, border=4)
     qr.add_data(token)
     qr.make(fit=True)
-    img = qr.make_image(fill_color="#38bdf8", back_color="#1e293b")
+    img = qr.make_image(fill_color="black", back_color="white")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
