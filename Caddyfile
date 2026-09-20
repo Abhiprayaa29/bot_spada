@@ -1,21 +1,22 @@
 # Caddyfile for SPADA Dashboard
-# Place at /etc/caddy/Caddyfile on your GCP VM
-# Caddy auto-provisions HTTPS via Let's Encrypt
+# Caddy auto-provisions HTTPS via Let's Encrypt (requires domain)
+# Binary: ~/bin/caddy (v2.10.1)
+# Usage: ~/bin/caddy run --config /home/abdillahabhi/Documents/bot_spada/Caddyfile
 
-# Option 1: Use your domain (recommended)
-# Replace yourdomain.com with your actual domain
-# dashboard.yourdomain.com {
-#     reverse_proxy localhost:8080
-# }
-
-# Option 2: Use IP address (no HTTPS - for local/internal only)
-# For Telegram Web App, you NEED a domain with HTTPS.
-# This config is for local dev/testing only.
-:8088 {
+# ── Localhost testing (no HTTPS, just reverse proxy) ────────
+:8080 {
     reverse_proxy localhost:8088
 }
 
-# Option 3: With a domain (copy this block and replace domain)
-# spada-bot.yourdomain.com {
-#     reverse_proxy localhost:8080
+# ── Domain mode (uncomment + replace with your domain) ──────
+# Point your domain A record to this server's public IP.
+# Caddy will auto-provision HTTPS via Let's Encrypt.
+#
+# spada.yourdomain.com {
+#     reverse_proxy localhost:8088
+# }
+#
+# Or for Telegram Web App:
+# dashboard.yourdomain.com {
+#     reverse_proxy localhost:8088
 # }
