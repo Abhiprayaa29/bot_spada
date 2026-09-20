@@ -914,6 +914,8 @@ async def cmd_setjadwal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Kehadiran
     """
     if len(context.args) == 0:
+        # Set flag so next message is treated as schedule paste
+        context.user_data["awaiting_schedule_paste"] = True
         # Show help / usage
         await update.message.reply_text(
             "📅 *Input Jadwal Manual (Bulk)*\n\n"
