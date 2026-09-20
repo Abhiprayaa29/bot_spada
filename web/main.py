@@ -54,6 +54,7 @@ def _nav(active: str) -> str:
     links = [
         ("dashboard", "/", "Dashboard"),
         ("jadwal", "/jadwal", "Jadwal"),
+        ("jadwal-input", "/jadwal-input", "Input Jadwal"),
         ("tugas", "/tugas", "Tugas"),
         ("nilai", "/nilai", "Nilai"),
         ("absensi", "/absensi", "Absensi"),
@@ -556,6 +557,131 @@ async def api_daily_log(request: Request):
     if not chat_id:
         raise HTTPException(status_code=401)
     return read_tracker().get("daily_log", [])
+
+
+# ── Jadwal Input Page ─────────────────────────────────────────
+
+@app.get("/jadwal-input", response_class=HTMLResponse)
+async def jadwal_input_page(request: Request):
+    chat_id = _get_chat_id(request)
+    if not chat_id:
+        return RedirectResponse("/pair", status_code=302)
+
+    # Read existing schedule
+    from bima import load_schedule
+    existing = load_schedule()
+    existing_names = [s.get("name", "") for s in existing]
+
+    html = f"""<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Input Jadwal BIMA</title>
+<style>
+body {{ font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 24px; }}
+.container {{ max-width: 900px; margin: 0 auto; }}
+h1 {{ color: #38bdf8; margin-bottom: 8px; }}
+.info {{ color: #94a3b8; margin-bottom: 20px; line-height: 1.6; }}
+.info code {{ background: #1e293b; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }}
+textarea {{ width: 100%; height: 400px; background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 8px; padding: 16px; font-family: monospace; font-size: 13px; resize: vertical; box-sizing: border-box; }}
+textarea:focus {{ outline: none; border-color: #38bdf8; }}
+.btn {{ display: inline-block; margin-top: 12px; padding: 10px 24px; background: #2563eb; color: #fff; border: none; border-radius: 6px; font-size: 15px; cursor: pointer; }}
+.btn:hover {{ background: #1d4ed8; }}
+.result {{ margin-top: 16px; padding: 12px; border-radius: 8px; display: none; }}
+.result.ok {{ background: #064e3b; border: 1px solid #10b981; color: #6ee7b7; display: block; }}
+.result.err {{ background: #450a0a; border: 1px solid #ef4444; color: #fca5a5; display: block; }}
+.existing {{ margin-top: 24px; }}
+.existing h3 {{ color: #38bdf8; }}
+table {{ width: 100%; border-collapse: collapse; margin-top: 8px; }}
+th, td {{ padding: 8px 12px; text-align: left; border-bottom: 1px solid #1e293b; font-size: 13px; }}
+th {{ color: #94a3b8; font-weight: 600; }}
+.back {{ display: inline-block; margin-bottom: 16px; color: #38bdf8; text-decoration: none; }}
+.back:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+<div class="container">
+<a class="back" href="/jadwal">&larr; Kembali ke Jadwal</a>
+<h1>Input Jadwal BIMA</h1>
+<div class="info">
+<strong>Cara pakai:</strong><br>
+1. Buka <a href="https://bima.upnyk.ac.id" target="_blank" style="color:#38bdf8">bima.upnyk.ac.id</a> dan login<br>
+2. Buka halaman Jadwal (Lihat Jadwal / Kuliah)<br>
+3. Select-all (Ctrl+A) teks jadwal, lalu copy (Ctrl+C)<br>
+4. Paste teksnya di bawah ini, lalu klik <strong>Simpan</strong><br><br>
+Format otomatis terdeteksi: tab-separated multi-line (header KURIKULUM, KODE, NAMA, KELAS, SKS, lalu baris schedule per mata kuliah).
+</div>
+<form id="form" method="POST" action="/jadwal-input">
+<textarea name="jadwal_text" placeholder="Paste jadwal BIMA di sini..."></textarea><br>
+<button class="btn" type="submit">Simpan Jadwal</button>
+</form>
+<div id="result" class="result"></div>
+
+<div class="existing">
+<h3>Jadwal Tersimpan ({len(existing_names)} mata kuliah)</h3>
+"""
+    if existing:
+        html += "<table><tr><th>Nama</th><th>Kode</th><th>Hari</th><th>Jam</th><th>Ruang</th><th>Dosen</th></tr>\n"
+        for j in existing:
+            html += f"<tr><td>{j.get('name','')}</td><td>{j.get('code','')}</td><td>{j.get('day','')}</td><td>{j.get('start','')}-{j.get('end','')}</td><td>{j.get('room','')}</td><td>{j.get('dosen','')}</td></tr>\n"
+        html += "</table>\n"
+    else:
+        html += "<p style='color:#94a3b8'>Belum ada jadwal tersimpan.</p>\n"
+
+    html += """</div></div>
+<script>
+document.getElementById("form").addEventListener("submit", async function(e) {
+    e.preventDefault();
+    const form = e.target;
+    const data = new FormData(form);
+    const resultDiv = document.getElementById("result");
+    resultDiv.className = "result";
+    resultDiv.style.display = "none";
+    try {
+        const resp = await fetch("/jadwal-input", { method: "POST", body: data });
+        const json = await resp.json();
+        if (json.ok) {
+            resultDiv.className = "result ok";
+            resultDiv.textContent = json.message;
+            resultDiv.style.display = "block";
+            setTimeout(() => location.reload(), 1500);
+        } else {
+            resultDiv.className = "result err";
+            resultDiv.textContent = json.error || "Terjadi kesalahan";
+            resultDiv.style.display = "block";
+        }
+    } catch(err) {
+        resultDiv.className = "result err";
+        resultDiv.textContent = "Network error: " + err.message;
+        resultDiv.style.display = "block";
+    }
+});
+</script>
+</body></html>"""
+    return HTMLResponse(content=html)
+
+
+@app.post("/jadwal-input")
+async def jadwal_input_post(request: Request):
+    chat_id = _get_chat_id(request)
+    if not chat_id:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    from bima import parse_schedule_input, save_schedule
+    form = await request.form()
+    text = form.get("jadwal_text", "")
+
+    if not text or not text.strip():
+        return JSONResponse({"ok": False, "error": "Teks jadwal kosong."})
+
+    courses = parse_schedule_input(str(text))
+    if not courses:
+        return JSONResponse({"ok": False, "error": "Tidak bisa parse jadwal. Pastikan format benar (tab-separated dari BIMA)."})
+
+    save_schedule(courses)
+    names = [c.get("name", "?") for c in courses]
+    return JSONResponse({"ok": True, "message": f"Berhasil menyimpan {len(courses)} mata kuliah: {', '.join(names)}"})
 
 
 # ── Logout ───────────────────────────────────────────────────

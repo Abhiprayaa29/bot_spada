@@ -1,486 +1,222 @@
-"""BIMA Scraper — lightweight requests-based client with cookie auth.
+"""BIMA schedule + grades — manual input parsing + JSON storage.
 
-No DrissionPage, no reCAPTCHA solving.
-User logs into BIMA manually in browser, exports cookies, sends to bot.
+No browser, no scraping. User pastes jadwal text, this module parses and saves it.
 """
 
 import os
 import re
 import json
-import time
 import logging
-import requests
-from typing import Optional
-from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-BIMA_BASE_URL = "https://bima.upnyk.ac.id"
-COOKIE_FILE = os.path.join(os.path.dirname(__file__), "data", "bima_cookies.json")
-GRADES_FILE = os.path.join(os.path.dirname(__file__), "data", "bima_grades.json")
 SCHEDULE_FILE = os.path.join(os.path.dirname(__file__), "data", "bima_schedule.json")
-
-JADWAL_URLS = [
-    f"{BIMA_BASE_URL}/akademik/jadwal",
-    f"{BIMA_BASE_URL}/akademik/jadwal-kuliah",
-    f"{BIMA_BASE_URL}/mahasiswa/jadwal",
-    f"{BIMA_BASE_URL}/jadwal",
-]
-
-NILAI_URLS = [
-    f"{BIMA_BASE_URL}/akademik/nilai",
-    f"{BIMA_BASE_URL}/akademik/nilai-mahasiswa",
-    f"{BIMA_BASE_URL}/mahasiswa/nilai",
-    f"{BIMA_BASE_URL}/nilai",
-]
+GRADES_FILE = os.path.join(os.path.dirname(__file__), "data", "bima_grades.json")
 
 
-def _ensure_dir():
-    os.makedirs(os.path.dirname(COOKIE_FILE), exist_ok=True)
+# ── Schedule parser (tab-separated blocks from SPADA/BIMA) ───
 
+def parse_schedule_input(text: str) -> list[dict]:
+    """Parse tab-separated schedule blocks pasted from BIMA/SPADA.
 
-class BimaClient:
-    """Simple requests-based BIMA client. Cookie auth only."""
+    Expected format per course (multi-line block):
 
-    def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
-        })
-        self.session.verify = False
+        IF21\\t120210032\\tKapita Selekta\\tIF-A\\t2\\t
+        Sabtu 07:30 - 09:15 Patt.I-3A
+        (blank)
+        Awang Hendrianto P. Dr. S.T., M.T.
+        (blank)
+        0
 
-    # ── Cookie management ──────────────────────────────────────
+    Praktikum / courses with no schedule:
 
-    def load_cookies(self) -> bool:
-        """Load cookies from data/bima_cookies.json."""
-        if not os.path.exists(COOKIE_FILE):
-            return False
-        try:
-            with open(COOKIE_FILE, "r") as f:
-                cookies = json.load(f)
-            if not cookies:
-                return False
-            now = time.time()
-            for c in cookies:
-                if c.get("expiry") and c["expiry"] < now:
-                    logger.info("BIMA cookies expired")
-                    return False
-            for c in cookies:
-                name = c.get("name", "")
-                value = c.get("value", "")
-                domain = c.get("domain", ".upnyk.ac.id")
-                path = c.get("path", "/")
-                self.session.cookies.set(name, value, domain=domain, path=path)
-            logger.info(f"Loaded {len(cookies)} BIMA cookies")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to load BIMA cookies: {e}")
-            return False
+        120210059\\t120210059\\tPraktikum Pemrograman IoT dan Komputasi Awan\\tIF-A\\t2\\t
+        (blank)
+        (blank)
+        (blank)
+        0
 
-    def save_cookies(self):
-        """Persist current session cookies to disk."""
-        try:
-            _ensure_dir()
-            cookies = []
-            for c in self.session.cookies:
-                entry = {
-                    "name": c.name,
-                    "value": c.value,
-                    "domain": c.domain,
-                    "path": c.path,
-                }
-                if hasattr(c, "expires") and c.expires:
-                    entry["expiry"] = c.expires
-                cookies.append(entry)
-            with open(COOKIE_FILE, "w") as f:
-                json.dump(cookies, f, indent=2)
-            logger.info(f"Saved {len(cookies)} BIMA cookies")
-        except Exception as e:
-            logger.error(f"Failed to save BIMA cookies: {e}")
+    Returns list of dicts with keys:
+        code, name, kelas, sks, day, start, end, room, dosen, kurikulum
+    """
+    courses = []
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
 
-    def import_cookies_netscape(self, text: str) -> int:
-        """Import cookies from Netscape/browser cookie export format."""
-        count = 0
-        for line in text.strip().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("\t")
-            if len(parts) < 7:
-                continue
-            domain, _, path, secure, expiry, name, value = parts[:7]
-            self.session.cookies.set(
-                name, value,
-                domain=domain.lstrip("."),
-                path=path,
+    i = 0
+    n = len(lines)
+
+    while i < n:
+        line = lines[i].rstrip()
+        stripped = line.strip()
+
+        # Skip blank lines and non-data header lines (no tabs)
+        if not stripped or "\t" not in stripped:
+            i += 1
+            continue
+
+        # ── Parse the tab-separated header line ──
+        parts = [p.strip() for p in line.split("\t")]
+        # Strip trailing empty fields (e.g. trailing tab on Praktikum lines)
+        while parts and not parts[-1]:
+            parts.pop()
+
+        # Need at least: code, name, kelas, sks
+        # Some lines have 5 fields: kurikulum, code, name, kelas, sks
+        # Some have 4: code, name, kelas, sks (kurikulum = same as code)
+        if len(parts) < 4:
+            i += 1
+            continue
+
+        if len(parts) >= 5 or (len(parts) >= 4 and not parts[0].isdigit()):
+            # 5-field format: kurikulum, code, name, kelas, sks
+            kurikulum = parts[0]
+            code = parts[1]
+            name = parts[2]
+            kelas = parts[3]
+            sks_str = parts[4] if len(parts) >= 5 else ""
+        else:
+            code = parts[0]
+            name = parts[1]
+            kelas = parts[2]
+            sks_str = parts[3]
+            kurikulum = code
+
+        sks = int(sks_str) if sks_str.isdigit() else 0
+
+        # ── Scan ahead for schedule, dosen, kehadiran ──
+        day = ""
+        start_time = ""
+        end_time = ""
+        room = ""
+        dosen_lines = []
+        kehadiran = ""
+
+        j = i + 1
+        found_schedule = False
+        blanks_after_schedule = 0
+        dosen_done = False
+
+        while j < n:
+            ahead = lines[j].rstrip()
+            ahead_s = ahead.strip()
+
+            # Stop if we hit another tab-separated header line (next course)
+            # Schedule lines have at most 1 tab (e.g. "Sabtu 07:30 - 09:15\tPatt.I-3A"),
+            # header lines have 3+ tabs, so only break on 2+ tabs.
+            if ahead.count("\t") >= 2:
+                break
+
+            # ── Check for schedule line ──
+            sched_match = re.match(
+                r"(Senin|Selasa|Rabu|Kamis|Jumat|Sabtu|Minggu)"
+                r"\s+(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*(.*)",
+                ahead_s,
+                re.IGNORECASE,
             )
-            count += 1
-        if count > 0:
-            self.save_cookies()
-        logger.info(f"Imported {count} cookies from Netscape format")
-        return count
 
-    def import_cookies_json(self, text: str) -> int:
-        """Import cookies from JSON array (browser devtools export)."""
-        try:
-            cookies = json.loads(text)
-        except json.JSONDecodeError:
-            return 0
-        if not isinstance(cookies, list):
-            return 0
-        count = 0
-        for c in cookies:
-            name = c.get("name", "")
-            value = c.get("value", "")
-            domain = c.get("domain", ".upnyk.ac.id")
-            path = c.get("path", "/")
-            if name:
-                self.session.cookies.set(name, value, domain=domain.lstrip("."), path=path)
-                count += 1
-        if count > 0:
-            self.save_cookies()
-        logger.info(f"Imported {count} cookies from JSON format")
-        return count
-
-    def import_cookies_string(self, text: str) -> int:
-        """Import cookies from 'name=value; name2=value2' format (from browser console)."""
-        text = text.strip()
-        if text.startswith("[") or text.startswith("{"):
-            return self.import_cookies_json(text)
-        if "\t" in text and len(text.split("\t")) >= 7:
-            return self.import_cookies_netscape(text)
-        # Parse "key=value; key2=value2" format
-        count = 0
-        for pair in text.split(";"):
-            pair = pair.strip()
-            if "=" not in pair:
+            if sched_match and not found_schedule:
+                day = sched_match.group(1).capitalize()
+                start_time = sched_match.group(2)
+                end_time = sched_match.group(3)
+                room = sched_match.group(4).strip()
+                found_schedule = True
+                j += 1
                 continue
-            name, value = pair.split("=", 1)
-            name = name.strip()
-            value = value.strip()
-            if name:
-                self.session.cookies.set(name, value, domain=".upnyk.ac.id", path="/")
-                count += 1
-        if count > 0:
-            self.save_cookies()
-        logger.info(f"Imported {count} cookies from string format")
-        return count
 
-    # ── Auth check ─────────────────────────────────────────────
+            # ── Check for kehadiran (just a digit) ──
+            if ahead_s.isdigit() and found_schedule:
+                kehadiran = ahead_s
+                j += 1
+                break
 
-    def is_logged_in(self) -> bool:
-        """Check if current cookies provide a valid BIMA session."""
-        try:
-            resp = self.session.get(BIMA_BASE_URL, timeout=10, allow_redirects=True)
-            if "/login" in resp.url:
-                return False
-            text = resp.text.lower()
-            if "logout" in text or "keluar" in text or "dashboard" in text:
-                return True
-            if "mahasiswa" in text or "akademik" in text:
-                return True
-            return resp.status_code == 200
-        except Exception as e:
-            logger.error(f"BIMA auth check failed: {e}")
-            return False
-
-    def get_dashboard_name(self) -> str:
-        """Try to extract student name from BIMA dashboard."""
-        try:
-            resp = self.session.get(BIMA_BASE_URL, timeout=10, allow_redirects=True)
-            if "/login" in resp.url:
-                return ""
-            soup = BeautifulSoup(resp.text, "html.parser")
-            # Look for name in common elements
-            for sel in [".user-name", ".nama", "h4", "h3", "strong", ".profile-name"]:
-                el = soup.select_one(sel)
-                if el:
-                    text = el.get_text(strip=True)
-                    if len(text) > 3 and any(c.isalpha() for c in text):
-                        return text
-            return ""
-        except Exception:
-            return ""
-
-    # ── Jadwal (Schedule) ──────────────────────────────────────
-
-    def get_jadwal(self) -> list:
-        """Scrape class schedule from BIMA."""
-        if not self.load_cookies():
-            logger.warning("No BIMA cookies loaded")
-            return []
-
-        for url in JADWAL_URLS:
-            try:
-                resp = self.session.get(url, timeout=15, allow_redirects=True)
-                if resp.status_code != 200:
-                    continue
-                if "/login" in resp.url:
-                    logger.warning("BIMA session expired during jadwal fetch")
-                    return []
-                schedule = self._parse_jadwal_html(resp.text)
-                if schedule:
-                    self._save_schedule(schedule)
-                    logger.info(f"Got {len(schedule)} schedule entries from {url}")
-                    return schedule
-            except Exception as e:
-                logger.debug(f"Jadwal fetch failed from {url}: {e}")
+            # If we haven't found schedule yet and this is blank,
+            # skip blank lines between header and schedule/dosen
+            if not ahead_s:
+                j += 1
                 continue
-        logger.warning("Could not fetch jadwal from any BIMA URL")
-        return []
 
-    def _parse_jadwal_html(self, html: str) -> list:
-        """Parse schedule from BIMA HTML page."""
-        soup = BeautifulSoup(html, "html.parser")
-        entries = []
-
-        # Strategy 1: table rows
-        for table in soup.find_all("table"):
-            for row in table.find_all("tr"):
-                cells = row.find_all(["td", "th"])
-                if len(cells) < 3:
-                    continue
-                texts = [c.get_text(strip=True) for c in cells]
-                entry = self._classify_jadwal_row(texts)
-                if entry:
-                    entries.append(entry)
-
-        # Strategy 2: card-based layout
-        if not entries:
-            for card in soup.find_all(class_=re.compile(r"card|item|row|jadwal")):
-                text = card.get_text(" ", strip=True)
-                entry = self._parse_jadwal_text(text)
-                if entry:
-                    entries.append(entry)
-
-        # Strategy 3: structured data in specific elements
-        if not entries:
-            for item in soup.find_all(class_=re.compile(r"jadwal|schedule|matkul|course")):
-                text = item.get_text(" ", strip=True)
-                entry = self._parse_jadwal_text(text)
-                if entry:
-                    entries.append(entry)
-
-        return entries
-
-    def _classify_jadwal_row(self, cells):
-        """Classify a table row as a schedule entry."""
-        cells = [c for c in cells if c]
-        if len(cells) < 2:
-            return None
-
-        day_pattern = re.compile(
-            r"(senin|selasa|rabu|kamis|jumat|jum'at|sabtu|minggu)", re.IGNORECASE
-        )
-        time_pattern = re.compile(r"\d{1,2}[:.]\d{2}")
-
-        has_day = any(day_pattern.search(c) for c in cells)
-        has_time = any(time_pattern.search(c) for c in cells)
-
-        if not has_day and not has_time:
-            return None
-
-        entry = {"name": "", "code": "", "day": "", "time": "", "room": "", "sks": "", "lecturer": ""}
-
-        for cell in cells:
-            dm = day_pattern.search(cell)
-            if dm:
-                entry["day"] = dm.group(1).capitalize()
-            tm = time_pattern.search(cell)
-            if tm and not entry["time"]:
-                entry["time"] = cell
-            if re.match(r"^\d{1,2}$", cell):
-                entry["sks"] = cell
-            if not entry["name"] and len(cell) > 5 and not day_pattern.search(cell):
-                entry["name"] = cell
-            if re.match(r"^[A-Z]{2,10}\d{3,5}$", cell):
-                entry["code"] = cell
-
-        return entry if entry["name"] else None
-
-    def _parse_jadwal_text(self, text):
-        """Try to parse schedule from free text."""
-        day_pattern = re.compile(
-            r"(senin|selasa|rabu|kamis|jumat|jum'at|sabtu|minggu)", re.IGNORECASE
-        )
-        time_pattern = re.compile(r"(\d{1,2}[:.]\d{2})\s*[-\u2013]\s*(\d{1,2}[:.]\d{2})")
-
-        dm = day_pattern.search(text)
-        tm = time_pattern.search(text)
-        if not dm:
-            return None
-
-        entry = {
-            "name": "",
-            "code": "",
-            "day": dm.group(1).capitalize(),
-            "time": tm.group(0) if tm else "",
-            "room": "",
-            "sks": "",
-            "lecturer": "",
-        }
-        remainder = text[:dm.start()] + text[dm.end():]
-        if tm:
-            remainder = remainder[:tm.start()] + remainder[tm.end():]
-        remainder = re.sub(r"\s+", " ", remainder).strip("- ")
-        entry["name"] = remainder[:100] if remainder else ""
-
-        return entry if entry["name"] else None
-
-    def _save_schedule(self, schedule):
-        """Save jadwal to data/bima_schedule.json."""
-        try:
-            _ensure_dir()
-            with open(SCHEDULE_FILE, "w") as f:
-                json.dump(schedule, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"Failed to save schedule: {e}")
-
-    # ── Nilai (Grades) ─────────────────────────────────────────
-
-    def get_nilai(self) -> list:
-        """Scrape grades from BIMA."""
-        if not self.load_cookies():
-            logger.warning("No BIMA cookies loaded")
-            return []
-
-        for url in NILAI_URLS:
-            try:
-                resp = self.session.get(url, timeout=15, allow_redirects=True)
-                if resp.status_code != 200:
-                    continue
-                if "/login" in resp.url:
-                    logger.warning("BIMA session expired during nilai fetch")
-                    return []
-                grades = self._parse_nilai_html(resp.text)
-                if grades:
-                    self._save_grades(grades)
-                    logger.info(f"Got {len(grades)} grade entries from {url}")
-                    return grades
-            except Exception as e:
-                logger.debug(f"Nilai fetch failed from {url}: {e}")
+            # ── Dosen line (non-blank, non-schedule, non-digit) ──
+            # Skip "Kurikulum: ..." lines
+            if ahead_s.startswith("Kurikulum:"):
+                j += 1
                 continue
-        logger.warning("Could not fetch nilai from any BIMA URL")
-        return []
 
-    def _parse_nilai_html(self, html: str) -> list:
-        """Parse grades from BIMA HTML page."""
-        soup = BeautifulSoup(html, "html.parser")
-        entries = []
+            if found_schedule and not ahead_s.isdigit():
+                # After schedule found, non-blank non-digit = dosen
+                dosen_lines.append(ahead_s)
+            elif not found_schedule and not sched_match:
+                # Before schedule, could be dosen if no schedule for this course
+                # Check if next few lines are all blank (praktikum with no schedule)
+                dosen_lines.append(ahead_s)
 
-        # Strategy 1: table rows
-        for table in soup.find_all("table"):
-            for row in table.find_all("tr"):
-                cells = row.find_all(["td", "th"])
-                texts = [c.get_text(strip=True) for c in cells]
-                if len(texts) < 2:
-                    continue
-                entry = self._classify_nilai_row(texts)
-                if entry:
-                    entries.append(entry)
+            j += 1
 
-        # Strategy 2: card-based
-        if not entries:
-            for card in soup.find_all(class_=re.compile(r"card|item|row|nilai|grade")):
-                text = card.get_text(" ", strip=True)
-                entry = self._parse_nilai_text(text)
-                if entry:
-                    entries.append(entry)
+        dosen = ", ".join(dosen_lines) if dosen_lines else ""
 
-        return entries
+        courses.append({
+            "kurikulum": kurikulum,
+            "code": code,
+            "name": name,
+            "kelas": kelas,
+            "sks": sks,
+            "day": day,
+            "start": start_time,
+            "end": end_time,
+            "room": room,
+            "dosen": dosen,
+        })
 
-    def _classify_nilai_row(self, cells):
-        """Classify a table row as a grade entry."""
-        cells = [c for c in cells if c]
-        if len(cells) < 2:
-            return None
+        i = j
 
-        grade_pattern = re.compile(r"^[A-Da-d][+-]?$|^E$|^[-]$")
-        score_pattern = re.compile(r"^\d{1,3}([.,]\d+)?$")
-
-        entry = {"name": "", "code": "", "credit": "", "grade": "", "score": ""}
-
-        for cell in cells:
-            if grade_pattern.match(cell):
-                entry["grade"] = cell.upper()
-            elif score_pattern.match(cell) and not entry["score"]:
-                entry["score"] = cell.replace(",", ".")
-            elif re.match(r"^[A-Z]{2,10}\d{3,5}$", cell):
-                entry["code"] = cell
-            elif re.match(r"^\d{1,2}$", cell) and not entry["credit"]:
-                entry["credit"] = cell
-            elif not entry["name"] and len(cell) > 3:
-                entry["name"] = cell
-
-        return entry if entry["name"] else None
-
-    def _parse_nilai_text(self, text):
-        """Try to parse a grade entry from free text."""
-        grade_pattern = re.compile(r"\b([A-Da-d][+-]?|E)\b")
-        score_pattern = re.compile(r"(\d{1,3}([.,]\d+)?)")
-        grades_found = grade_pattern.findall(text)
-        scores_found = score_pattern.findall(text)
-
-        if not grades_found and not scores_found:
-            return None
-
-        entry = {"name": "", "code": "", "credit": "", "grade": "", "score": ""}
-        code_match = re.search(r"[A-Z]{2,10}\d{3,5}", text)
-        if code_match:
-            entry["code"] = code_match.group()
-
-        if grades_found:
-            entry["grade"] = grades_found[0].upper()
-        if scores_found:
-            entry["score"] = scores_found[0][0].replace(",", ".")
-
-        # Extract course name: remove codes, grades, scores
-        remainder = text
-        if code_match:
-            remainder = remainder[:code_match.start()] + remainder[code_match.end():]
-        for g in grades_found:
-            remainder = re.sub(r"\b" + re.escape(g) + r"\b", "", remainder)
-        for s in scores_found:
-            remainder = remainder.replace(s[0], "")
-        remainder = re.sub(r"\s+", " ", remainder).strip("- ")
-        entry["name"] = remainder[:100] if remainder else ""
-
-        return entry if entry["name"] else None
-
-    def _save_grades(self, grades):
-        """Save nilai to data/bima_grades.json."""
-        try:
-            _ensure_dir()
-            with open(GRADES_FILE, "w") as f:
-                json.dump(grades, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"Failed to save grades: {e}")
+    return courses
 
 
-# ── Convenience functions ──────────────────────────────────────
+# ── Storage functions ───────────────────────────────────────
 
-def load_bima_jadwal() -> list:
-    """Load cached jadwal from data/bima_schedule.json."""
+def save_schedule(courses: list[dict]) -> None:
+    """Save parsed courses to data/bima_schedule.json."""
+    os.makedirs(os.path.dirname(SCHEDULE_FILE), exist_ok=True)
+    with open(SCHEDULE_FILE, "w") as f:
+        json.dump(courses, f, indent=2, ensure_ascii=False)
+    logger.info(f"Saved {len(courses)} schedule entries")
+
+
+def load_schedule() -> list[dict]:
+    """Load schedule from data/bima_schedule.json."""
     if os.path.exists(SCHEDULE_FILE):
         try:
-            with open(SCHEDULE_FILE, "r") as f:
+            with open(SCHEDULE_FILE) as f:
                 return json.load(f)
         except Exception:
             pass
     return []
 
 
-def load_bima_nilai() -> list:
-    """Load cached nilai from data/bima_grades.json."""
+def save_grades(grades: list[dict]) -> None:
+    """Save grades to data/bima_grades.json."""
+    os.makedirs(os.path.dirname(GRADES_FILE), exist_ok=True)
+    with open(GRADES_FILE, "w") as f:
+        json.dump(grades, f, indent=2, ensure_ascii=False)
+    logger.info(f"Saved {len(grades)} grade entries")
+
+
+def load_grades() -> list[dict]:
+    """Load grades from data/bima_grades.json."""
     if os.path.exists(GRADES_FILE):
         try:
-            with open(GRADES_FILE, "r") as f:
+            with open(GRADES_FILE) as f:
                 return json.load(f)
         except Exception:
             pass
     return []
+
+
+# ── Aliases for backward compatibility ──────────────────────
+
+def load_bima_jadwal() -> list[dict]:
+    return load_schedule()
+
+
+def load_bima_nilai() -> list[dict]:
+    return load_grades()
