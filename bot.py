@@ -139,7 +139,11 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ── Auto-scrape attendance IDs ────────────────────────
         await update.message.reply_text("🔍 Memindai ID presensi…")
-        amap = scraper.scrape_attendance_ids(semester=sem)
+        amap = {}
+        try:
+            amap = scraper.scrape_attendance_ids(semester=sem)
+        except Exception as e:
+            print(f"[BOT] Attendance scrape failed: {e}")
         if amap:
             save_attendance_map(amap)
             await update.message.reply_text(
@@ -149,7 +153,11 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Tidak ditemukan presensi otomatis.")
 
         # ── Get student name ──────────────────────────────────
-        student_name = scraper.get_student_name()
+        student_name = ""
+        try:
+            student_name = scraper.get_student_name()
+        except Exception as e:
+            print(f"[BOT] Get student name failed: {e}")
 
         # ── Summary ───────────────────────────────────────────
         courses = scraper.get_courses(semester=sem)
