@@ -20,14 +20,11 @@ from config import config
 from store import (
     has_credentials, save_credentials, clear_credentials,
     get_current_semester, save_current_semester,
-    get_bima_semester, save_bima_semester,
-    get_bima_courses, save_bima_courses,
     save_attendance_map, get_attendance_map,
     save_course_schedule, get_course_schedule,
     update_course_schedule_entry,
 )
 from spada import SpadaScraper
-from bima import BimaScraper
 from tracker import (
     add_assignment, mark_submitted, get_pending_assignments,
     get_submitted_assignments, get_all_assignments, get_submission_history,
@@ -70,42 +67,6 @@ def _require_login(update: Update) -> bool:
         )
         return False
     return True
-
-
-def _get_bima_course_names() -> set[str]:
-    """Return BIMA course names for filtering. Empty if no BIMA data."""
-    courses = get_bima_courses()
-    return {c["name"] for c in courses if c.get("name")}
-
-
-def _filter_courses_by_bima(courses: list[dict]) -> list[dict]:
-    """Filter SPADA courses to only those enrolled in BIMA current semester."""
-    bima_names = _get_bima_course_names()
-    if not bima_names:
-        return courses  # No BIMA filter — return all
-
-    filtered = []
-    for c in courses:
-        cname = c.get("name", "")
-        # Match if any BIMA course name is a substring or vice versa
-        if any(bn.lower() in cname.lower() or cname.lower() in bn.lower()
-               for bn in bima_names):
-            filtered.append(c)
-    return filtered
-
-
-def _filter_assignments_by_bima(assignments: list) -> list:
-    """Filter SPADA assignments to only those from BIMA-enrolled courses."""
-    bima_names = _get_bima_course_names()
-    if not bima_names:
-        return assignments
-
-    return [
-        a for a in assignments
-        if any(bn.lower() in a.get("course", "").lower() or
-               a.get("course", "").lower() in bn.lower()
-               for bn in bima_names)
-    ]
 
 
 # ── Conversation states for /login ───────────────────────────
@@ -165,51 +126,6 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_credentials(username, password)
         _scraper = scraper
 
-        # ── Validate against BIMA (optional) ──────────────────
-        await update.message.reply_text("🔍 Validasi ke BIMA…")
-        bima_ok = False
-        try:
-            bima = BimaScraper(username, password)
-            if bima.login():
-                bima_ok = True
-                logger.info("BIMA login successful")
-            else:
-                logger.warning("BIMA login failed (reCAPTCHA challenge?), continuing without BIMA")
-        except Exception as e:
-            logger.warning(f"BIMA login error: {e}")
-
-        if bima_ok:
-            # ── BIMA semester (more accurate) ────────────────
-            try:
-                await update.message.reply_text("🔍 Mendeteksi semester dari BIMA…")
-                bima_info = bima.get_semester_info()
-                if bima_info and bima_info.get("semester_name"):
-                    bima_sem = bima_info["semester_name"]
-                    save_bima_semester(bima_sem)
-                    await update.message.reply_text(
-                        f"🎓 *Semester BIMA:* {bima_sem}",
-                        parse_mode=ParseMode.MARKDOWN,
-                    )
-
-                # ── BIMA enrolled courses (source of truth) ─────
-                await update.message.reply_text("🔍 Memindai mata kuliah dari BIMA…")
-                bima_courses = bima.get_courses()
-                if bima_courses:
-                    save_bima_courses(bima_courses)
-                    await update.message.reply_text(
-                        f"📚 *{len(bima_courses)} mata kuliah aktif dari BIMA.*",
-                        parse_mode=ParseMode.MARKDOWN,
-                    )
-            except Exception as e:
-                logger.warning(f"BIMA scrape failed: {e}")
-                await update.message.reply_text(
-                    "⚠️ Gagal memindai BIMA. Lanjut dengan SPADA saja.",
-                )
-        else:
-            await update.message.reply_text(
-                "⚠️ BIMA tidak bisa diakses (reCAPTCHA). Lanjut dengan SPADA saja.",
-            )
-
         # ── Auto-detect semester (SPADA) ─────────────────────
         await update.message.reply_text("🔍 Mendeteksi semester aktif…")
         sem = scraper.detect_current_semester()
@@ -264,8 +180,6 @@ async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     clear_credentials()
-    save_bima_semester("")
-    save_bima_courses([])
     _scraper = None
     await update.message.reply_text(
         "👋 Logout berhasil!\n"
@@ -302,7 +216,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  /briefing — Ringkasan harian\n"
         f"  /sync — Sync tracker dengan SPADA\n"
         f"  /status — Status bot\n"
-        f"  /semester — Info semester dari BIMA\n"
+        f"  /semester — Info semester aktif\n"
         f"  /help — Bantuan\n\n"
         f"*Auto Features:*\n"
         f"  🌅 Daily briefing jam 7 pagi\n"
@@ -329,7 +243,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/briefing — Ringkasan harian\n"
         "/sync — Sync tracker\n"
         "/status — Status bot\n"
-        "/semester — Info semester dari BIMA\n\n"
+        "/semester — Info semester aktif\n\n"
         "*Presensi:*\n"
         "/absen [nama_kelas] — Absen manual\n\n"
         "*Upload via Telegram:*\n"
@@ -362,7 +276,7 @@ async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         date_str = now.strftime("%d %B %Y")
         sem = get_current_semester()
 
-        courses = _filter_courses_by_bima(scraper.get_courses(semester=sem))
+        courses = scraper.get_courses(semester=sem)
         course_names = {c["name"] for c in courses}
 
         # Today's classes (only from courses in current semester)
@@ -446,9 +360,6 @@ async def cmd_deadlines(update: Update, context: ContextTypes.DEFAULT_TYPE):
         scraper = _get_scraper()
         sem = get_current_semester()
         deadlines = scraper.get_deadlines(semester=sem)
-        bima_names = _get_bima_course_names()
-        if bima_names:
-            deadlines = [d for d in deadlines if not d.course or d.course == "Unknown" or any(bn.lower() in d.course.lower() for bn in bima_names)]
 
         if not deadlines:
             await update.message.reply_text(
@@ -456,7 +367,7 @@ async def cmd_deadlines(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        label = f"BIMA ({len(bima_names)} matkul)" if bima_names else f"Semester {sem}"
+        label = f"Semester {sem}"
         lines = [f"📋 *Deadline Mendatang ({label}):*\n"]
         for i, d in enumerate(deadlines[:15], 1):
             emoji = "📝" if d.activity_type == "assignment" else "❓" if d.activity_type == "quiz" else "📅"
@@ -488,7 +399,6 @@ async def cmd_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
         scraper = _get_scraper()
         schedule = get_course_schedule()
         sem = get_current_semester()
-        bima_names = _get_bima_course_names()
 
         if context.args:
             target = context.args[0]
@@ -516,12 +426,9 @@ async def cmd_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
             marker = " ← *aktif*" if s == sem else ""
             lines.append(f"*Semester {s}{marker}* — {len(cls_list)} mata kuliah:")
             for c in cls_list:
-                in_bima = " ✅" if bima_names and any(bn.lower() in c['name'].lower() for bn in bima_names) else ""
-                lines.append(f"  • {c['name']}{in_bima}")
+                lines.append(f"  • {c['name']}")
             lines.append("")
 
-        if bima_names:
-            lines.append(f"✅ = Mata kuliah aktif di BIMA ({len(bima_names)} total)")
         lines.append(f"\n💡 Gunakan `/courses {sem}` untuk detail.")
 
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
@@ -538,9 +445,6 @@ async def cmd_absen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     amap = get_attendance_map()
-    bima_names = _get_bima_course_names()
-    if bima_names:
-        amap = {n: aid for n, aid in amap.items() if any(bn.lower() in n.lower() for bn in bima_names)}
 
     if context.args:
         course_name = " ".join(context.args)
@@ -626,17 +530,12 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status = "🟢 Connected" if scraper.logged_in else "🔴 Disconnected"
     amap = get_attendance_map()
-    bima_names = _get_bima_course_names()
-
-    bima_sem = get_bima_semester()
 
     lines = [
         f"*Status Bot:*\n",
         f"🤖 Bot: 🟢 Running",
         f"📚 SPADA: {status}",
-        f"🎒 Semester SPADA: {sem} ({len(courses)} mata kuliah)",
-        f"🏛️ Semester BIMA: {bima_sem or '(belum terdeteksi)'}",
-        f"📋 Matkul BIMA: {len(bima_names)}",
+        f"🎒 Semester: {sem} ({len(courses)} mata kuliah)",
         f"📋 Presensi terdaftar: {len(amap)}",
         f"⏰ Auto Absen: {'🟢 ON' if config.AUTO_ATTENDANCE_ENABLED else '🔴 OFF'}",
         f"🔄 Check Interval: {config.REMINDER_CHECK_INTERVAL_MINUTES} min",
@@ -665,7 +564,6 @@ async def cmd_tugas(update: Update, context: ContextTypes.DEFAULT_TYPE):
         scraper = _get_scraper()
         sem = get_current_semester()
         assignments = scraper.get_assignments(semester=sem)
-        assignments = _filter_assignments_by_bima(assignments)
 
         if not assignments:
             await update.message.reply_text(f"✅ Tidak ada tugas semester {sem}!")
@@ -677,8 +575,7 @@ async def cmd_tugas(update: Update, context: ContextTypes.DEFAULT_TYPE):
         submitted_count = 0
         pending_count = 0
 
-        bima_names = _get_bima_course_names()
-        label = f"BIMA ({len(bima_names)} matkul)" if bima_names else f"Semester {sem}"
+        label = f"Semester {sem}"
         lines = [f"📝 *Daftar Tugas ({label}):*\n"]
 
         if with_deadline:
@@ -767,18 +664,13 @@ async def send_daily_briefing(bot):
     today_name = now.strftime("%A")
     date_str = now.strftime("%d %B %Y")
     sem = get_current_semester()
-    bima_names = _get_bima_course_names()
-    bima_label = f"BIMA ({len(bima_names)} matkul)" if bima_names else f"Semester {sem}"
 
-    lines = [f"🌅 *Selamat Pagi!*\n📅 {today_name}, {date_str}\n🎒 {bima_label}\n"]
+    lines = [f"🌅 *Selamat Pagi!*\n📅 {today_name}, {date_str}\n🎒 Semester {sem}\n"]
 
     scraper = _get_scraper()
     if scraper and scraper.logged_in:
-        if bima_names:
-            course_names = set(bima_names)
-        else:
-            courses = scraper.get_courses(semester=sem)
-            course_names = {c["name"] for c in courses}
+        courses = scraper.get_courses(semester=sem)
+        course_names = {c["name"] for c in courses}
 
         schedule = get_course_schedule()
         lines.append("*📚 Jadwal Hari Ini:*")
@@ -856,7 +748,6 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
         scraper = _get_scraper()
         sem = get_current_semester()
         assignments = scraper.get_assignments(semester=sem)
-        assignments = _filter_assignments_by_bima(assignments)
         count = 0
         submitted = 0
         pending = 0
@@ -938,49 +829,44 @@ async def cmd_setjadwal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# /semester — detect semester from BIMA
+# /semester — detect semester from SPADA
 # ============================================================
 
 async def cmd_semester(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show or refresh semester info from BIMA."""
+    """Show or refresh semester info from SPADA."""
     if not _require_login(update):
         return
 
     sem_spada = get_current_semester()
-    sem_bima = get_bima_semester()
 
     if context.args and context.args[0] == "refresh":
-        # Force refresh from BIMA
-        await update.message.reply_text("🔄 Mendeteksi semester dari BIMA…")
+        # Force refresh from SPADA
+        await update.message.reply_text("🔄 Mendeteksi semester dari SPADA…")
         try:
-            from store import get_credentials
-            u, p = get_credentials()
-            bima = BimaScraper(u, p)
-            info = bima.get_semester_info()
-            if info and info.get("semester_name"):
-                sem_bima = info["semester_name"]
-                save_bima_semester(sem_bima)
+            scraper = _get_scraper()
+            sem = scraper.get_semester()
+            if sem:
+                save_current_semester(sem)
                 await update.message.reply_text(
-                    f"✅ *Semester BIMA:* {sem_bima}\n\n"
-                    f"🎓 Semester SPADA: {sem_spada or '(belum terdeteksi)'}",
+                    f"✅ *Semester SPADA:* {sem}\n\n"
+                    f"🎒 Semester aktif: {sem}",
                     parse_mode=ParseMode.MARKDOWN,
                 )
             else:
                 await update.message.reply_text(
-                    "⚠️ Tidak bisa mendeteksi semester dari BIMA.\n"
+                    "⚠️ Tidak bisa mendeteksi semester dari SPADA.\n"
                     "Pastikan kredensial benar.",
                 )
         except Exception as e:
-            await update.message.reply_text(f"❌ Error BIMA: {e}")
+            await update.message.reply_text(f"❌ Error SPADA: {e}")
         return
 
     # Show current info
     lines = [
         "*🎓 Info Semester:*\n",
         f"📚 SPADA: {sem_spada or '(belum terdeteksi)'}",
-        f"🏛️ BIMA: {sem_bima or '(belum terdeteksi)'}",
         "",
-        "💡 Ketik `/semester refresh` untuk update dari BIMA.",
+        "💡 Ketik `/semester refresh` untuk update dari SPADA.",
     ]
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
@@ -1081,9 +967,6 @@ async def auto_reminder(app: Application):
         scraper = _get_scraper()
         sem = get_current_semester()
         deadlines = scraper.get_deadlines(semester=sem)
-        bima_names = _get_bima_course_names()
-        if bima_names:
-            deadlines = [d for d in deadlines if not d.course or d.course == "Unknown" or any(bn.lower() in d.course.lower() for bn in bima_names)]
         for d in deadlines:
             if d.due_datetime:
                 now = datetime.now()
@@ -1128,12 +1011,9 @@ async def auto_attendance(app: Application):
 
     schedule = get_course_schedule()
     amap = get_attendance_map()
-    bima_names = _get_bima_course_names()
 
     for course_name, s in schedule.items():
         if s.get("day") != current_day:
-            continue
-        if bima_names and not any(bn.lower() in course_name.lower() for bn in bima_names):
             continue
         end_time = s.get("end", "")
         if not end_time:

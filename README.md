@@ -26,9 +26,8 @@ Telegram bot untuk mengelola kuliah di SPADA WIMAYA (UPNYK). Fitur lengkap mulai
 
 | Fitur | Deskripsi |
 |-------|-----------|
-| **Login/Logout** | Login via Telegram dengan validasi SPADA + BIMA sekaligus |
-| **Auto Deteksi Semester** | Otomatis mendeteksi semester aktif dari BIMA |
-| **Filter Mata Kuliah BIMA** | Hanya menampilkan mata kuliah yang terdaftar di BIMA (semester aktif) |
+| **Login/Logout** | Login via Telegram dengan validasi SPADA |
+| **Auto Deteksi Semester** | Otomatis mendeteksi semester aktif dari SPADA |
 | **Dashboard** | Ringkasan lengkap: jadwal hari ini, tugas pending, nilai terkini |
 | **Deadline Reminder** | Notifikasi otomatis 24 jam, 1 jam, dan 15 menit sebelum deadline |
 | **Auto Absen** | Absen otomatis 5 menit sebelum kelas berakhir |
@@ -42,10 +41,9 @@ Telegram bot untuk mengelola kuliah di SPADA WIMAYA (UPNYK). Fitur lengkap mulai
 ## Cara Kerja
 
 1. **Login** — Ketik `/login` di Telegram, masukkan NIM dan password SPADA
-2. **Validasi BIMA** — Bot otomatis login ke BIMA untuk mendeteksi semester aktif dan daftar mata kuliah
-3. **Filter Otomatis** — Semua fitur (dashboard, deadline, tugas, absen) hanya menampilkan mata kuliah semester aktif yang terdaftar di BIMA
-4. **Auto Reminder** — Bot mengecek deadline setiap 30 menit, kirim notifikasi saat mendekati waktu submit
-5. **Auto Absen** — Bot mengecek jadwal setiap 5 menit, absen otomatis saat masuk window 5 menit sebelum kelas berakhir
+2. **Auto Semester** — Bot otomatis mendeteksi semester aktif dari SPADA
+3. **Auto Reminder** — Bot mengecek deadline setiap 30 menit, kirim notifikasi saat mendekati waktu submit
+4. **Auto Absen** — Bot mengecek jadwal setiap 5 menit, absen otomatis saat masuk window 5 menit sebelum kelas berakhir
 
 ---
 
@@ -57,7 +55,6 @@ Telegram bot untuk mengelola kuliah di SPADA WIMAYA (UPNYK). Fitur lengkap mulai
 | **Telegram Bot Token** | Dari [@BotFather](https://t.me/BotFather) |
 | **Telegram Chat ID** | Dari [@userinfobot](https://t.me/userinfobot) |
 | **Akun SPADA** | NIM dan password SPADA UPNYK |
-| **DrissionPage + Chromium** | Untuk scraping BIMA (login otomatis, anti reCAPTCHA) |
 
 ---
 
@@ -67,8 +64,8 @@ Telegram bot untuk mengelola kuliah di SPADA WIMAYA (UPNYK). Fitur lengkap mulai
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/YOUR_USERNAME/spada-bot.git
-cd spada-bot
+git clone https://github.com/Abhiprayaa29/bot_spada.git
+cd bot_spada
 
 # 2. Buat virtual environment
 python -m venv venv
@@ -78,17 +75,15 @@ source venv/bin/activate  # Linux/Mac
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Install dependencies sudah termasuk DrissionPage (otomatis install Chromium)
-
-# 5. Buat file .env
+# 4. Buat file .env
 cp .env.example .env
 
-# 6. Edit .env — isi 2 variabel saja:
+# 5. Edit .env — isi 2 variabel saja:
 #    TELEGRAM_BOT_TOKEN=token_dari_botfather
 #    TELEGRAM_CHAT_ID=id_chat_dari_userinfobot
 nano .env
 
-# 7. Jalankan bot
+# 6. Jalankan bot
 python bot.py
 ```
 
@@ -102,8 +97,8 @@ Setelah bot berjalan, buka Telegram dan ketik `/login` untuk masuk dengan akun S
 # 2. SSH ke instance
 
 # 3. Clone repository
-git clone https://github.com/YOUR_USERNAME/spada-bot.git
-cd spada-bot
+git clone https://github.com/Abhiprayaa29/bot_spada.git
+cd bot_spada
 
 # 4. Jalankan setup script
 sudo bash setup.sh
@@ -168,10 +163,10 @@ Di dalam `config.py`, ada beberapa pengaturan yang bisa diubah:
 | Command | Deskripsi | Contoh |
 |---------|-----------|--------|
 | `/start` | Mulai bot, tampilkan menu bantuan | `/start` |
-| `/login` | Login ke SPADA + BIMA | `/login` |
+| `/login` | Login ke SPADA | `/login` |
 | `/logout` | Logout, hapus session tersimpan | `/logout` |
 | `/dashboard` | Ringkasan: jadwal hari ini, tugas pending, nilai | `/dashboard` |
-| `/deadlines` | Lihat deadline mendatang (filtered by BIMA) | `/deadlines` |
+| `/deadlines` | Lihat deadline mendatang | `/deadlines` |
 | `/courses` | Daftar semua mata kuliah per semester | `/courses` |
 | `/courses 5` | Lihat mata kuliah semester tertentu | `/courses 5` |
 | `/tugas` | Daftar tugas lengkap dengan status submission | `/tugas` |
@@ -179,7 +174,8 @@ Di dalam `config.py`, ada beberapa pengaturan yang bisa diubah:
 | `/absenall` | Absen semua kelas hari ini | `/absenall` |
 | `/grades` | Lihat nilai dari semua mata kuliah | `/grades` |
 | `/sync` | Sinkronisasi data SPADA ke tracker lokal | `/sync` |
-| `/status` | Status bot, semester, jumlah matkul BIMA | `/status` |
+| `/status` | Status bot, semester, jumlah matkul | `/status` |
+| `/semester` | Info semester aktif dari SPADA | `/semester` |
 | `/briefing` | Kirim briefing harian secara manual | `/briefing` |
 | `/help` | Tampilkan daftar command | `/help` |
 
@@ -213,10 +209,6 @@ Setiap jam **07:00 WIB** (00:00 UTC), bot mengirim briefing harian:
 - Daftar tugas pending
 - Ringkasan nilai terkini
 
-### Filtering BIMA
-
-Semua data (jadwal, deadline, tugas, absen) **di-filter berdasarkan mata kuliah yang terdaftar di BIMA**. Ini memastikan hanya mata kuliah semester aktif yang ditampilkan.
-
 ---
 
 ## Struktur File
@@ -224,16 +216,15 @@ Semua data (jadwal, deadline, tugas, absen) **di-filter berdasarkan mata kuliah 
 ```
 bot_spada/
 ├── bot.py              # Telegram bot (main entry point)
-├── bima.py             # BIMA scraper (DrissionPage CDP stealth + reCAPTCHA)
-├── spada.py            # SPADA scraper (requests + BeautifulSoup)
+├── spada.py            # SPADA scraper (DrissionPage + BeautifulSoup)
+├── bima.py             # BIMA scraper (kept but unused)
 ├── config.py           # Konfigurasi dari .env + store.py
 ├── store.py            # Penyimpanan session (data/session.json)
 ├── tracker.py          # Local tracker untuk tugas/submission/nilai
 ├── data/               # Data runtime (di-.gitignore)
-│   ├── session.json    # Session SPADA + BIMA
-│   ├── bima_cookies.json  # Cookie BIMA
+│   ├── session.json    # Session SPADA
 │   └── tugas_tracker.json # Tracker tugas lokal
-├── .env                # Credentials 
+├── .env                # Credentials
 ├── .env.example        # Template .env
 ├── .gitignore          # File yang di-exclude dari git
 ├── requirements.txt    # Python dependencies
@@ -263,7 +254,6 @@ python bot.py
 
 1. Pastikan NIM dan password benar
 2. Coba login langsung di https://spada.upnyk.ac.id untuk memastikan akun aktif
-3. Jika BIMA gagal, bot tetap bisa jalan tanpa filter BIMA
 
 ### Auto absen tidak jalan
 
@@ -293,9 +283,6 @@ sudo apt-get install -y libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
 **Q: Apakah password SPADA disimpan di `.env`?**
 A: Tidak. Password hanya diinput via `/login` di Telegram dan disimpan di `data/session.json` (yang di-.gitignore).
 
-**Q: Apakah bot bisa jalan tanpa BIMA?**
-A: Ya. Jika login BIMA gagal, bot tetap berjalan tapi tanpa filter semester. Semua mata kuliah akan ditampilkan.
-
 **Q: Berapa resource yang dibutuhkan?**
 A: Sangat ringan. Cukup 1 CPU, 512MB RAM (GCP e2-micro gratis).
 
@@ -312,7 +299,6 @@ A: Ketik `/logout` lalu `/login` lagi dengan credential baru.
 - Bot berjalan 24/7 di GCP Free Tier (Always Free)
 - Auto-restart saat crash (systemd)
 - File `data/session.json` menyimpan session agar bot tidak perlu login ulang setiap restart
-- BIMA menggunakan DrissionPage (CDP stealth) untuk bypass reCAPTCHA v2
 - Screenshot bukti absen disimpan di folder `screenshots/` (otomatis dihapus setelah dikirim)
 
 ---
