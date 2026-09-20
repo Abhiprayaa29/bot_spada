@@ -27,6 +27,14 @@ from store import (
 )
 from spada import SpadaScraper
 from bima import load_bima_jadwal, load_bima_nilai, load_schedule, save_schedule, parse_schedule_input
+
+# ── Jadwal check helper ─────────────────────────────────────
+
+def _has_jadwal() -> bool:
+    """True if user has input jadwal (either via web or manual)."""
+    bima = load_schedule()          # data/bima_schedule.json
+    manual = get_course_schedule()  # data/session.json → course_schedule
+    return bool(bima) or bool(manual)
 from tracker import (
     add_assignment, mark_submitted, get_pending_assignments,
     get_submitted_assignments, get_all_assignments, get_submission_history,
@@ -505,6 +513,17 @@ async def cmd_absen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _require_login(update):
         return
 
+    if not _has_jadwal():
+        await update.message.reply_text(
+            "📋 *Belum ada jadwal*\n\n"
+            "Absensi baru muncul setelah jadwal diinput.\n\n"
+            "Cara input jadwal:\n"
+            "• /bima lalu /setjadwal [paste jadwal]\n"
+            "• Web dashboard → menu Jadwal",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
     amap = get_attendance_map()
 
     if context.args:
@@ -617,6 +636,17 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_tugas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _require_login(update):
+        return
+
+    if not _has_jadwal():
+        await update.message.reply_text(
+            "📋 *Belum ada jadwal*\n\n"
+            "Tugas baru muncul setelah jadwal diinput.\n\n"
+            "Cara input jadwal:\n"
+            "• /bima lalu /setjadwal [paste jadwal]\n"
+            "• Web dashboard → menu Jadwal",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
 
     await update.message.reply_text("⏳ Loading assignments & checking status…")

@@ -374,7 +374,18 @@ async def tugas_page(request: Request):
     tracker = read_tracker()
     assignments = tracker.get("assignments", [])
 
+    # Check if jadwal exists — if not, hide tugas
+    bima_schedule = read_bima_schedule()
+    session = read_session()
+    manual_schedule = session.get("course_schedule", {})
+    has_jadwal = bool(bima_schedule) or bool(manual_schedule)
+
     body = '<h1 class="page-title">Tugas</h1>'
+
+    if not has_jadwal:
+        body += '<div class="section"><p class="empty">📋 Belum ada jadwal. Tugas baru muncul setelah jadwal diinput.</p>'
+        body += '<p class="empty">Input jadwal melalui menu <a href="/jadwal-input">Jadwal</a> atau /setjadwal di Telegram.</p></div>'
+        return HTMLResponse(_page("tugas", body, "Tugas"))
 
     if not assignments:
         body += '<p class="empty">Belum ada tugas terdeteksi. Gunakan /sync di Telegram.</p>'
@@ -483,7 +494,17 @@ async def absensi_page(request: Request):
     amap = session.get("attendance_map", {})
     daily_log = tracker.get("daily_log", [])
 
+    # Check if jadwal exists — if not, hide absensi
+    bima_schedule = read_bima_schedule()
+    manual_schedule = session.get("course_schedule", {})
+    has_jadwal = bool(bima_schedule) or bool(manual_schedule)
+
     body = '<h1 class="page-title">Riwayat Absensi</h1>'
+
+    if not has_jadwal:
+        body += '<div class="section"><p class="empty">📋 Belum ada jadwal. Absensi baru muncul setelah jadwal diinput.</p>'
+        body += '<p class="empty">Input jadwal melalui menu <a href="/jadwal-input">Jadwal</a> atau /setjadwal di Telegram.</p></div>'
+        return HTMLResponse(_page("absensi", body, "Absensi"))
 
     # Attendance map
     if amap:
