@@ -1,6 +1,6 @@
 # SPADA Telegram Bot
 
-Telegram bot untuk mengelola kuliah di SPADA WIMAYA (UPNYK). Fitur lengkap mulai dari reminder deadline, auto absen, sinkronisasi nilai, hingga briefing harian — semuanya otomatis.
+Telegram bot + web dashboard untuk mengelola kuliah di SPADA WIMAYA (UPNYK). Login otomatis, reminder deadline, auto absen, sinkronisasi nilai, input jadwal manual via web — semuanya dari satu tempat.
 
 ---
 
@@ -12,13 +12,14 @@ Telegram bot untuk mengelola kuliah di SPADA WIMAYA (UPNYK). Fitur lengkap mulai
 - [Instalasi](#instalasi)
   - [Setup Lokal](#setup-lokal)
   - [Deploy ke GCP Free Tier](#deploy-ke-gcp-free-tier)
+- [Web Dashboard](#web-dashboard)
+- [Input Jadwal (BIMA)](#input-jadwal-bima)
 - [Konfigurasi](#konfigurasi)
 - [Commands](#commands)
 - [Fitur Otomatis](#fitur-otomatis)
 - [Struktur File](#struktur-file)
 - [Troubleshooting](#troubleshooting)
 - [FAQ](#faq)
-- [Catatan](#catatan)
 
 ---
 
@@ -28,7 +29,9 @@ Telegram bot untuk mengelola kuliah di SPADA WIMAYA (UPNYK). Fitur lengkap mulai
 |-------|-----------|
 | **Login/Logout** | Login via Telegram dengan validasi SPADA |
 | **Auto Deteksi Semester** | Otomatis mendeteksi semester aktif dari SPADA |
-| **Dashboard** | Ringkasan lengkap: jadwal hari ini, tugas pending, nilai terkini |
+| **Web Dashboard** | Dashboard read-only dengan QR pairing — lihat jadwal, tugas, nilai, absensi |
+| **Input Jadwal Manual** | Input jadwal dari BIMA/SPADA langsung di web atau via Telegram |
+| **Jadwal-Gated Features** | Absensi dan tugas hanya muncul setelah jadwal diinput |
 | **Deadline Reminder** | Notifikasi otomatis 24 jam, 1 jam, dan 15 menit sebelum deadline |
 | **Auto Absen** | Absen otomatis 5 menit sebelum kelas berakhir |
 | **Screenshot Bukti** | Screenshot bukti absen dikirim langsung ke Telegram |
@@ -41,9 +44,12 @@ Telegram bot untuk mengelola kuliah di SPADA WIMAYA (UPNYK). Fitur lengkap mulai
 ## Cara Kerja
 
 1. **Login** — Ketik `/login` di Telegram, masukkan NIM dan password SPADA
-2. **Auto Semester** — Bot otomatis mendeteksi semester aktif dari SPADA
-3. **Auto Reminder** — Bot mengecek deadline setiap 30 menit, kirim notifikasi saat mendekati waktu submit
-4. **Auto Absen** — Bot mengecek jadwal setiap 5 menit, absen otomatis saat masuk window 5 menit sebelum kelas berakhir
+2. **Input Jadwal** — Salin jadwal dari BIMA/SPADA, paste di web dashboard atau via `/setjadwal`
+3. **Auto Semester** — Bot otomatis mendeteksi semester aktif dari SPADA
+4. **Auto Reminder** — Bot mengecek deadline setiap 30 menit, kirim notifikasi saat mendekati waktu submit
+5. **Auto Absen** — Bot mengecek jadwal setiap 5 menit, absen otomatis saat masuk window 5 menit sebelum kelas berakhir
+
+> **Catatan:** Absensi dan tugas hanya aktif setelah jadwal diinput. Jika belum ada jadwal, menu absensi dan tugas tidak akan menampilkan data.
 
 ---
 
@@ -52,6 +58,7 @@ Telegram bot untuk mengelola kuliah di SPADA WIMAYA (UPNYK). Fitur lengkap mulai
 | Komponen | Keterangan |
 |----------|------------|
 | **Python 3.10+** | Runtime untuk bot |
+| **Chromium** | Untuk SPADA scraper (DrissionPage) |
 | **Telegram Bot Token** | Dari [@BotFather](https://t.me/BotFather) |
 | **Telegram Chat ID** | Dari [@userinfobot](https://t.me/userinfobot) |
 | **Akun SPADA** | NIM dan password SPADA UPNYK |
@@ -70,21 +77,20 @@ cd bot_spada
 # 2. Buat virtual environment
 python -m venv venv
 source venv/bin/activate  # Linux/Mac
-# venv\Scripts\activate   # Windows
 
 # 3. Install dependencies
 pip install -r requirements.txt
 
 # 4. Buat file .env
 cp .env.example .env
-
-# 5. Edit .env — isi 2 variabel saja:
-#    TELEGRAM_BOT_TOKEN=token_dari_botfather
-#    TELEGRAM_CHAT_ID=id_chat_dari_userinfobot
 nano .env
+# Isi: TELEGRAM_BOT_TOKEN dan TELEGRAM_CHAT_ID
 
-# 6. Jalankan bot
+# 5. Jalankan bot
 python bot.py
+
+# 6. Jalankan web dashboard (terminal terpisah)
+python -m uvicorn web.main:app --host 0.0.0.0 --port 8088
 ```
 
 Setelah bot berjalan, buka Telegram dan ketik `/login` untuk masuk dengan akun SPADA.
@@ -130,11 +136,78 @@ sudo systemctl stop spada-bot
 
 ---
 
+## Web Dashboard
+
+Dashboard web read-only untuk melihat data SPADA tanpa harus buka Telegram.
+
+### Fitur Dashboard
+
+| Halaman | Deskripsi |
+|---------|-----------|
+| **Dashboard** (`/`) | Ringkasan: jadwal hari ini, tugas pending, nilai |
+| **Jadwal** (`/jadwal`) | Daftar lengkap jadwal per hari |
+| **Input Jadwal** (`/jadwal-input`) | Form untuk paste jadwal dari BIMA/SPADA |
+| **Tugas** (`/tugas`) | Daftar tugas pending & sudah submit |
+| **Nilai** (`/nilai`) | Daftar nilai dari SPADA dan BIMA |
+| **Absensi** (`/absensi`) | Riwayat absensi dan attendance IDs |
+
+### Pairing QR Code
+
+1. Bot di Telegram kirim QR code saat `/login`
+2. Buka halaman pairing di web: `http://localhost:8088/pair`
+3. Scan QR code dari Telegram
+4. Session tersimpan di cookie, tidak perlu login ulang
+
+### Menjalankan Web Dashboard
+
+```bash
+# Development
+python -m uvicorn web.main:app --host 0.0.0.0 --port 8088 --reload
+
+# Production (dengan tmux/screen)
+tmux new-session -d -s web "python -m uvicorn web.main:app --host 0.0.0.0 --port 8088"
+```
+
+---
+
+## Input Jadwal (BIMA)
+
+Absensi dan tugas hanya muncul setelah jadwal diinput. Ada 2 cara:
+
+### Cara 1: Via Web Dashboard (Recommended)
+
+1. Buka `http://localhost:8088/jadwal-input`
+2. Salin jadwal dari BIMA/SPADA (format tab-separated)
+3. Paste di textarea, klik **Simpan**
+4. Jadwal otomatis tersimpan di `data/bima_schedule.json`
+
+### Cara 2: Via Telegram
+
+```
+/setjadwal
+[ paste jadwal di sini ]
+```
+
+### Format Jadwal
+
+Jadwal diambil dari halaman BIMA/SPADA dalam format tab-separated:
+
+```
+IF21	120210032	Kapita Selekta	IF-A	2
+Sabtu 07:30 - 09:15 Patt.I-3A
+
+Awang Hendrianto P. Dr. S.T., M.T.
+
+0
+```
+
+**Tips:** Buka halaman jadwal di browser, pilih semua (Ctrl+A), copy (Ctrl+C), lalu paste di form.
+
+---
+
 ## Konfigurasi
 
 ### File `.env`
-
-Hanya ada 2 variabel yang perlu diisi:
 
 ```env
 # Telegram Bot Token (dari @BotFather)
@@ -160,24 +233,45 @@ Di dalam `config.py`, ada beberapa pengaturan yang bisa diubah:
 
 ## Commands
 
-| Command | Deskripsi | Contoh |
-|---------|-----------|--------|
-| `/start` | Mulai bot, tampilkan menu bantuan | `/start` |
-| `/login` | Login ke SPADA | `/login` |
-| `/logout` | Logout, hapus session tersimpan | `/logout` |
-| `/dashboard` | Ringkasan: jadwal hari ini, tugas pending, nilai | `/dashboard` |
-| `/deadlines` | Lihat deadline mendatang | `/deadlines` |
-| `/courses` | Daftar semua mata kuliah per semester | `/courses` |
-| `/courses 5` | Lihat mata kuliah semester tertentu | `/courses 5` |
-| `/tugas` | Daftar tugas lengkap dengan status submission | `/tugas` |
-| `/absen [nama]` | Absen manual untuk kelas tertentu | `/absen Kriptografi` |
-| `/absenall` | Absen semua kelas hari ini | `/absenall` |
-| `/grades` | Lihat nilai dari semua mata kuliah | `/grades` |
-| `/sync` | Sinkronisasi data SPADA ke tracker lokal | `/sync` |
-| `/status` | Status bot, semester, jumlah matkul | `/status` |
-| `/semester` | Info semester aktif dari SPADA | `/semester` |
-| `/briefing` | Kirim briefing harian secara manual | `/briefing` |
-| `/help` | Tampilkan daftar command | `/help` |
+### Akun
+
+| Command | Deskripsi |
+|---------|-----------|
+| `/start` | Mulai bot, tampilkan menu bantuan |
+| `/login` | Login ke SPADA (kirim QR code untuk web pairing) |
+| `/logout` | Logout, hapus session tersimpan |
+| `/help` | Tampilkan daftar command |
+
+### Informasi
+
+| Command | Deskripsi |
+|---------|-----------|
+| `/dashboard` | Ringkasan: jadwal hari ini, tugas pending, nilai |
+| `/deadlines` | Lihat deadline mendatang |
+| `/courses` | Daftar semua mata kuliah per semester |
+| `/courses [semester]` | Filter mata kuliah per semester |
+| `/status` | Status bot, semester, jumlah matkul |
+| `/semester` | Info semester aktif dari SPADA |
+| `/briefing` | Ringkasan harian |
+| `/sync` | Sinkronisasi data SPADA ke tracker lokal |
+
+### Input Manual
+
+| Command | Deskripsi |
+|---------|-----------|
+| `/setjadwal` | Input jadwal dari BIMA/SPADA (paste text) |
+| `/setsemester [kode]` | Set kode semester manual |
+| `/listjadwal` | Lihat jadwal tersimpan |
+| `/bima` | Lihat status jadwal & nilai BIMA |
+
+### Presensi & Tugas
+
+| Command | Deskripsi |
+|---------|-----------|
+| `/tugas` | Lihat semua tugas dengan status submission |
+| `/absen [nama_kelas]` | Absen manual untuk kelas tertentu |
+
+> **Catatan:** `/tugas` dan `/absen` hanya berfungsi setelah jadwal diinput.
 
 ---
 
@@ -215,22 +309,35 @@ Setiap jam **07:00 WIB** (00:00 UTC), bot mengirim briefing harian:
 
 ```
 bot_spada/
-├── bot.py              # Telegram bot (main entry point)
-├── spada.py            # SPADA scraper (DrissionPage + BeautifulSoup)
-├── bima.py             # BIMA scraper (kept but unused)
-├── config.py           # Konfigurasi dari .env + store.py
-├── store.py            # Penyimpanan session (data/session.json)
-├── tracker.py          # Local tracker untuk tugas/submission/nilai
-├── data/               # Data runtime (di-.gitignore)
-│   ├── session.json    # Session SPADA
-│   └── tugas_tracker.json # Tracker tugas lokal
-├── .env                # Credentials
-├── .env.example        # Template .env
-├── .gitignore          # File yang di-exclude dari git
-├── requirements.txt    # Python dependencies
-├── setup.sh            # Setup script untuk GCP
-├── spada-bot.service   # Systemd service file
-└── README.md           # Dokumentasi ini
+├── bot.py                  # Telegram bot (main entry point)
+├── spada.py                # SPADA scraper (DrissionPage + requests)
+├── bima.py                 # Parser jadwal manual dari BIMA/SPADA
+├── config.py               # Konfigurasi dari .env + store.py
+├── store.py                # Penyimpanan session (data/session.json)
+├── tracker.py              # Local tracker untuk tugas/submission/nilai
+├── pairing_store.py        # QR pairing token storage
+├── web/                    # FastAPI web dashboard
+│   ├── main.py             # Routes, pages, API endpoints
+│   ├── auth.py             # Cookie-based session auth
+│   ├── pairing.py          # QR code generation & token validation
+│   ├── data_reader.py      # Safe JSON file reader
+│   ├── static/style.css    # Dashboard CSS
+│   └── templates/          # (unused — inline HTML due to Jinja2 compat)
+├── data/                   # Data runtime (di-.gitignore)
+│   ├── session.json        # Session SPADA (credentials, semester, schedule)
+│   ├── tugas_tracker.json  # Tracker tugas/submission/nilai
+│   ├── bima_schedule.json  # Jadwal dari BIMA (manual input)
+│   ├── bima_grades.json    # Nilai dari BIMA
+│   ├── bima_cookies.json   # (legacy, tidak dipakai)
+│   └── pairing_tokens.json # QR pairing tokens
+├── Caddyfile               # Caddy reverse proxy config
+├── .env                    # Credentials
+├── .env.example            # Template .env
+├── .gitignore              # File yang di-exclude dari git
+├── requirements.txt        # Python dependencies
+├── setup.sh                # Setup script untuk GCP
+├── spada-bot.service       # Systemd service file
+└── README.md               # Dokumentasi ini
 ```
 
 ---
@@ -243,27 +350,34 @@ bot_spada/
 # Cek apakah process berjalan
 pgrep -af "bot.py"
 
-# Cek log
-tail -50 /tmp/bot_spada.log
-
-# Restart
-python bot.py
+# Jalankan di foreground untuk lihat error
+source venv/bin/activate && python bot.py
 ```
 
 ### Login gagal
 
 1. Pastikan NIM dan password benar
 2. Coba login langsung di https://spada.upnyk.ac.id untuk memastikan akun aktif
+3. Jika muncul `httpx.ConnectError`, coba login ulang (error transient)
+
+### Absensi / Tugas tidak muncul
+
+1. Pastikan jadwal sudah diinput (cek `/bima` atau `/listjadwal`)
+2. Jika belum ada jadwal, input via `/setjadwal` atau web dashboard `/jadwal-input`
 
 ### Auto absen tidak jalan
 
 1. Pastikan `/status` menunjukkan `Auto Absen: ON`
 2. Pastikan attendance map sudah terisi (lihat `/absen` tanpa argumen)
-3. Cek apakah jadwal sudah benar di `data/session.json`
+3. Pastikan jadwal sudah benar di `data/session.json`
+
+### Web dashboard tidak bisa diakses
+
+1. Pastikan uvicorn berjalan: `curl http://localhost:8088/dashboard`
+2. Jika menggunakan Caddy, pastikan Caddy berjalan: `pgrep caddy`
+3. Pairing expired? Login ulang di Telegram untuk dapat QR code baru
 
 ### DrissionPage error
-
-DrissionPage menggunakan Chromium secara langsung via CDP (Chrome DevTools Protocol). Jika terjadi error:
 
 ```bash
 # Pastikan Chromium terinstall
@@ -287,19 +401,19 @@ A: Tidak. Password hanya diinput via `/login` di Telegram dan disimpan di `data/
 A: Sangat ringan. Cukup 1 CPU, 512MB RAM (GCP e2-micro gratis).
 
 **Q: Apakah aman untuk di-share ke GitHub?**
-A: Ya. File `.env` dan `data/` sudah di-.gitignore. Tidak ada credential yang ter-commit.
+A: Ya. File `.env`, `data/`, dan credentials sudah di-.gitignore. Tidak ada credential yang ter-commit.
 
 **Q: Bagaimana cara ganti password SPADA?**
 A: Ketik `/logout` lalu `/login` lagi dengan credential baru.
 
----
+**Q: Kenapa absensi tidak muncul?**
+A: Absensi dan tugas hanya muncul setelah jadwal diinput. Gunakan `/setjadwal` atau buka web dashboard `/jadwal-input` untuk input jadwal terlebih dahulu.
 
-## Catatan
+**Q: Format jadwal seperti apa yang diterima?**
+A: Format tab-separated dari BIMA/SPADA. Buka halaman jadwal di browser, pilih semua (Ctrl+A), copy, lalu paste di form input atau via `/setjadwal`.
 
-- Bot berjalan 24/7 di GCP Free Tier (Always Free)
-- Auto-restart saat crash (systemd)
-- File `data/session.json` menyimpan session agar bot tidak perlu login ulang setiap restart
-- Screenshot bukti absen disimpan di folder `screenshots/` (otomatis dihapus setelah dikirim)
+**Q: Bisakah import jadwal dari file?**
+A: Bisa. Salin isi jadwal dari browser, paste langsung ke textarea di web dashboard atau via `/setjadwal` di Telegram.
 
 ---
 
