@@ -1,60 +1,63 @@
-"""BIMA Scraper — DrissionPage-based login with reCAPTCHA v2 bypass.
+"""BIMA Scraper — lightweight requests-based client with cookie auth.
 
-Handles https://bima.upnyk.ac.id/login which has:
-  - Laravel CSRF token
-  - reCAPTCHA v2 (sitekey: 6LekiE0sAAAAABv_pEjSv8h_B6WNnz8BTlqe7AYZ)
-  - Same credentials as SPADA
-
-Strategy (DrissionPage):
-  - Uses Chrome DevTools Protocol (CDP) directly — no WebDriver fingerprint
-  - DrissionPage's ChromiumPage is much harder for reCAPTCHA to detect
-  - Adds human-like delays, random scrolling, realistic mouse patterns
-  - Falls back gracefully if reCAPTCHA challenge appears
-  - Saves cookies for session reuse across restarts
+No DrissionPage, no reCAPTCHA solving.
+User logs into BIMA manually in browser, exports cookies, sends to bot.
 """
 
 import os
 import re
 import json
 import time
-import random
 import logging
+import requests
 from typing import Optional
-
-from DrissionPage import ChromiumPage, ChromiumOptions
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
 BIMA_BASE_URL = "https://bima.upnyk.ac.id"
-BIMA_LOGIN_URL = f"{BIMA_BASE_URL}/login"
 COOKIE_FILE = os.path.join(os.path.dirname(__file__), "data", "bima_cookies.json")
+GRADES_FILE = os.path.join(os.path.dirname(__file__), "data", "bima_grades.json")
+SCHEDULE_FILE = os.path.join(os.path.dirname(__file__), "data", "bima_schedule.json")
+
+JADWAL_URLS = [
+    f"{BIMA_BASE_URL}/akademik/jadwal",
+    f"{BIMA_BASE_URL}/akademik/jadwal-kuliah",
+    f"{BIMA_BASE_URL}/mahasiswa/jadwal",
+    f"{BIMA_BASE_URL}/jadwal",
+]
+
+NILAI_URLS = [
+    f"{BIMA_BASE_URL}/akademik/nilai",
+    f"{BIMA_BASE_URL}/akademik/nilai-mahasiswa",
+    f"{BIMA_BASE_URL}/mahasiswa/nilai",
+    f"{BIMA_BASE_URL}/nilai",
+]
 
 
-class BimaScraper:
-    """DrissionPage-based BIMA scraper with reCAPTCHA v2 handling."""
+def _ensure_dir():
+    os.makedirs(os.path.dirname(COOKIE_FILE), exist_ok=True)
 
-    def __init__(self, username: str, password: str):
-        self.username = username
-        self.password = password
-        self.logged_in = False
-        self._page: Optional[ChromiumPage] = None
 
-    def _ensure_dir(self):
-        os.makedirs(os.path.dirname(COOKIE_FILE), exist_ok=True)
+class BimaClient:
+    """Simple requests-based BIMA client. Cookie auth only."""
 
-    def _save_cookies(self):
-        """Persist cookies for session reuse."""
-        try:
-            self._ensure_dir()
-            cookies = self._page.cookies()
-            with open(COOKIE_FILE, "w") as f:
-                json.dump(cookies, f, indent=2, default=str)
-            logger.info("BIMA cookies saved")
-        except Exception as e:
-            logger.error(f"Failed to save BIMA cookies: {e}")
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+        })
+        self.session.verify = False
 
-    def _load_cookies(self) -> bool:
-        """Load previously saved cookies."""
+    # ── Cookie management ──────────────────────────────────────
+
+    def load_cookies(self) -> bool:
+        """Load cookies from data/bima_cookies.json."""
         if not os.path.exists(COOKIE_FILE):
             return False
         try:
@@ -62,444 +65,422 @@ class BimaScraper:
                 cookies = json.load(f)
             if not cookies:
                 return False
-            # Check if cookies are expired (older than 24 hours)
-            for cookie in cookies:
-                if "expiry" in cookie:
-                    if cookie["expiry"] < time.time():
-                        logger.info("BIMA cookies expired")
-                        return False
-            # Navigate to domain first so cookies have a context
-            self._page.get(BIMA_BASE_URL)
-            time.sleep(1)
-            for cookie in cookies:
-                # DrissionPage set.cookies expects {name, value, domain, path, ...}
-                self._page.set.cookies(cookie)
-            logger.info(f"Loaded {len(cookies)} BIMA cookies from disk")
+            now = time.time()
+            for c in cookies:
+                if c.get("expiry") and c["expiry"] < now:
+                    logger.info("BIMA cookies expired")
+                    return False
+            for c in cookies:
+                name = c.get("name", "")
+                value = c.get("value", "")
+                domain = c.get("domain", ".upnyk.ac.id")
+                path = c.get("path", "/")
+                self.session.cookies.set(name, value, domain=domain, path=path)
+            logger.info(f"Loaded {len(cookies)} BIMA cookies")
             return True
         except Exception as e:
-            logger.warning(f"Failed to load BIMA cookies: {e}")
+            logger.error(f"Failed to load BIMA cookies: {e}")
             return False
 
-    def _start_browser(self):
-        """Launch Chromium via DrissionPage CDP with stealth settings."""
+    def save_cookies(self):
+        """Persist current session cookies to disk."""
         try:
-            co = ChromiumOptions()
-            co.headless()
-            co.set_argument("--no-sandbox")
-            co.set_argument("--disable-dev-shm-usage")
-            co.set_argument("--disable-gpu")
-            co.set_argument("--disable-blink-features=AutomationControlled")
-            co.set_argument("--disable-infobars")
-            co.set_argument("--window-size=1280,800")
-            co.set_argument("--lang=id-ID")
-            co.set_user_agent(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-            )
-            # Use a fresh profile to avoid residual automation flags
-            co.set_user_data_path("/tmp/bima_chrome_profile")
-
-            self._page = ChromiumPage(co)
-            logger.info("DrissionPage Chromium started")
+            _ensure_dir()
+            cookies = []
+            for c in self.session.cookies:
+                entry = {
+                    "name": c.name,
+                    "value": c.value,
+                    "domain": c.domain,
+                    "path": c.path,
+                }
+                if hasattr(c, "expires") and c.expires:
+                    entry["expiry"] = c.expires
+                cookies.append(entry)
+            with open(COOKIE_FILE, "w") as f:
+                json.dump(cookies, f, indent=2)
+            logger.info(f"Saved {len(cookies)} BIMA cookies")
         except Exception as e:
-            logger.error(f"Failed to start browser: {e}")
-            raise
+            logger.error(f"Failed to save BIMA cookies: {e}")
 
-    def _stop_browser(self):
-        """Clean up browser resources."""
+    def import_cookies_netscape(self, text: str) -> int:
+        """Import cookies from Netscape/browser cookie export format."""
+        count = 0
+        for line in text.strip().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 7:
+                continue
+            domain, _, path, secure, expiry, name, value = parts[:7]
+            self.session.cookies.set(
+                name, value,
+                domain=domain.lstrip("."),
+                path=path,
+            )
+            count += 1
+        if count > 0:
+            self.save_cookies()
+        logger.info(f"Imported {count} cookies from Netscape format")
+        return count
+
+    def import_cookies_json(self, text: str) -> int:
+        """Import cookies from JSON array (browser devtools export)."""
         try:
-            if self._page:
-                self._page.quit()
+            cookies = json.loads(text)
+        except json.JSONDecodeError:
+            return 0
+        if not isinstance(cookies, list):
+            return 0
+        count = 0
+        for c in cookies:
+            name = c.get("name", "")
+            value = c.get("value", "")
+            domain = c.get("domain", ".upnyk.ac.id")
+            path = c.get("path", "/")
+            if name:
+                self.session.cookies.set(name, value, domain=domain.lstrip("."), path=path)
+                count += 1
+        if count > 0:
+            self.save_cookies()
+        logger.info(f"Imported {count} cookies from JSON format")
+        return count
+
+    def import_cookies_string(self, text: str) -> int:
+        """Import cookies from 'name=value; name2=value2' format (from browser console)."""
+        text = text.strip()
+        if text.startswith("[") or text.startswith("{"):
+            return self.import_cookies_json(text)
+        if "\t" in text and len(text.split("\t")) >= 7:
+            return self.import_cookies_netscape(text)
+        # Parse "key=value; key2=value2" format
+        count = 0
+        for pair in text.split(";"):
+            pair = pair.strip()
+            if "=" not in pair:
+                continue
+            name, value = pair.split("=", 1)
+            name = name.strip()
+            value = value.strip()
+            if name:
+                self.session.cookies.set(name, value, domain=".upnyk.ac.id", path="/")
+                count += 1
+        if count > 0:
+            self.save_cookies()
+        logger.info(f"Imported {count} cookies from string format")
+        return count
+
+    # ── Auth check ─────────────────────────────────────────────
+
+    def is_logged_in(self) -> bool:
+        """Check if current cookies provide a valid BIMA session."""
+        try:
+            resp = self.session.get(BIMA_BASE_URL, timeout=10, allow_redirects=True)
+            if "/login" in resp.url:
+                return False
+            text = resp.text.lower()
+            if "logout" in text or "keluar" in text or "dashboard" in text:
+                return True
+            if "mahasiswa" in text or "akademik" in text:
+                return True
+            return resp.status_code == 200
+        except Exception as e:
+            logger.error(f"BIMA auth check failed: {e}")
+            return False
+
+    def get_dashboard_name(self) -> str:
+        """Try to extract student name from BIMA dashboard."""
+        try:
+            resp = self.session.get(BIMA_BASE_URL, timeout=10, allow_redirects=True)
+            if "/login" in resp.url:
+                return ""
+            soup = BeautifulSoup(resp.text, "html.parser")
+            # Look for name in common elements
+            for sel in [".user-name", ".nama", "h4", "h3", "strong", ".profile-name"]:
+                el = soup.select_one(sel)
+                if el:
+                    text = el.get_text(strip=True)
+                    if len(text) > 3 and any(c.isalpha() for c in text):
+                        return text
+            return ""
+        except Exception:
+            return ""
+
+    # ── Jadwal (Schedule) ──────────────────────────────────────
+
+    def get_jadwal(self) -> list:
+        """Scrape class schedule from BIMA."""
+        if not self.load_cookies():
+            logger.warning("No BIMA cookies loaded")
+            return []
+
+        for url in JADWAL_URLS:
+            try:
+                resp = self.session.get(url, timeout=15, allow_redirects=True)
+                if resp.status_code != 200:
+                    continue
+                if "/login" in resp.url:
+                    logger.warning("BIMA session expired during jadwal fetch")
+                    return []
+                schedule = self._parse_jadwal_html(resp.text)
+                if schedule:
+                    self._save_schedule(schedule)
+                    logger.info(f"Got {len(schedule)} schedule entries from {url}")
+                    return schedule
+            except Exception as e:
+                logger.debug(f"Jadwal fetch failed from {url}: {e}")
+                continue
+        logger.warning("Could not fetch jadwal from any BIMA URL")
+        return []
+
+    def _parse_jadwal_html(self, html: str) -> list:
+        """Parse schedule from BIMA HTML page."""
+        soup = BeautifulSoup(html, "html.parser")
+        entries = []
+
+        # Strategy 1: table rows
+        for table in soup.find_all("table"):
+            for row in table.find_all("tr"):
+                cells = row.find_all(["td", "th"])
+                if len(cells) < 3:
+                    continue
+                texts = [c.get_text(strip=True) for c in cells]
+                entry = self._classify_jadwal_row(texts)
+                if entry:
+                    entries.append(entry)
+
+        # Strategy 2: card-based layout
+        if not entries:
+            for card in soup.find_all(class_=re.compile(r"card|item|row|jadwal")):
+                text = card.get_text(" ", strip=True)
+                entry = self._parse_jadwal_text(text)
+                if entry:
+                    entries.append(entry)
+
+        # Strategy 3: structured data in specific elements
+        if not entries:
+            for item in soup.find_all(class_=re.compile(r"jadwal|schedule|matkul|course")):
+                text = item.get_text(" ", strip=True)
+                entry = self._parse_jadwal_text(text)
+                if entry:
+                    entries.append(entry)
+
+        return entries
+
+    def _classify_jadwal_row(self, cells):
+        """Classify a table row as a schedule entry."""
+        cells = [c for c in cells if c]
+        if len(cells) < 2:
+            return None
+
+        day_pattern = re.compile(
+            r"(senin|selasa|rabu|kamis|jumat|jum'at|sabtu|minggu)", re.IGNORECASE
+        )
+        time_pattern = re.compile(r"\d{1,2}[:.]\d{2}")
+
+        has_day = any(day_pattern.search(c) for c in cells)
+        has_time = any(time_pattern.search(c) for c in cells)
+
+        if not has_day and not has_time:
+            return None
+
+        entry = {"name": "", "code": "", "day": "", "time": "", "room": "", "sks": "", "lecturer": ""}
+
+        for cell in cells:
+            dm = day_pattern.search(cell)
+            if dm:
+                entry["day"] = dm.group(1).capitalize()
+            tm = time_pattern.search(cell)
+            if tm and not entry["time"]:
+                entry["time"] = cell
+            if re.match(r"^\d{1,2}$", cell):
+                entry["sks"] = cell
+            if not entry["name"] and len(cell) > 5 and not day_pattern.search(cell):
+                entry["name"] = cell
+            if re.match(r"^[A-Z]{2,10}\d{3,5}$", cell):
+                entry["code"] = cell
+
+        return entry if entry["name"] else None
+
+    def _parse_jadwal_text(self, text):
+        """Try to parse schedule from free text."""
+        day_pattern = re.compile(
+            r"(senin|selasa|rabu|kamis|jumat|jum'at|sabtu|minggu)", re.IGNORECASE
+        )
+        time_pattern = re.compile(r"(\d{1,2}[:.]\d{2})\s*[-\u2013]\s*(\d{1,2}[:.]\d{2})")
+
+        dm = day_pattern.search(text)
+        tm = time_pattern.search(text)
+        if not dm:
+            return None
+
+        entry = {
+            "name": "",
+            "code": "",
+            "day": dm.group(1).capitalize(),
+            "time": tm.group(0) if tm else "",
+            "room": "",
+            "sks": "",
+            "lecturer": "",
+        }
+        remainder = text[:dm.start()] + text[dm.end():]
+        if tm:
+            remainder = remainder[:tm.start()] + remainder[tm.end():]
+        remainder = re.sub(r"\s+", " ", remainder).strip("- ")
+        entry["name"] = remainder[:100] if remainder else ""
+
+        return entry if entry["name"] else None
+
+    def _save_schedule(self, schedule):
+        """Save jadwal to data/bima_schedule.json."""
+        try:
+            _ensure_dir()
+            with open(SCHEDULE_FILE, "w") as f:
+                json.dump(schedule, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Failed to save schedule: {e}")
+
+    # ── Nilai (Grades) ─────────────────────────────────────────
+
+    def get_nilai(self) -> list:
+        """Scrape grades from BIMA."""
+        if not self.load_cookies():
+            logger.warning("No BIMA cookies loaded")
+            return []
+
+        for url in NILAI_URLS:
+            try:
+                resp = self.session.get(url, timeout=15, allow_redirects=True)
+                if resp.status_code != 200:
+                    continue
+                if "/login" in resp.url:
+                    logger.warning("BIMA session expired during nilai fetch")
+                    return []
+                grades = self._parse_nilai_html(resp.text)
+                if grades:
+                    self._save_grades(grades)
+                    logger.info(f"Got {len(grades)} grade entries from {url}")
+                    return grades
+            except Exception as e:
+                logger.debug(f"Nilai fetch failed from {url}: {e}")
+                continue
+        logger.warning("Could not fetch nilai from any BIMA URL")
+        return []
+
+    def _parse_nilai_html(self, html: str) -> list:
+        """Parse grades from BIMA HTML page."""
+        soup = BeautifulSoup(html, "html.parser")
+        entries = []
+
+        # Strategy 1: table rows
+        for table in soup.find_all("table"):
+            for row in table.find_all("tr"):
+                cells = row.find_all(["td", "th"])
+                texts = [c.get_text(strip=True) for c in cells]
+                if len(texts) < 2:
+                    continue
+                entry = self._classify_nilai_row(texts)
+                if entry:
+                    entries.append(entry)
+
+        # Strategy 2: card-based
+        if not entries:
+            for card in soup.find_all(class_=re.compile(r"card|item|row|nilai|grade")):
+                text = card.get_text(" ", strip=True)
+                entry = self._parse_nilai_text(text)
+                if entry:
+                    entries.append(entry)
+
+        return entries
+
+    def _classify_nilai_row(self, cells):
+        """Classify a table row as a grade entry."""
+        cells = [c for c in cells if c]
+        if len(cells) < 2:
+            return None
+
+        grade_pattern = re.compile(r"^[A-Da-d][+-]?$|^E$|^[-]$")
+        score_pattern = re.compile(r"^\d{1,3}([.,]\d+)?$")
+
+        entry = {"name": "", "code": "", "credit": "", "grade": "", "score": ""}
+
+        for cell in cells:
+            if grade_pattern.match(cell):
+                entry["grade"] = cell.upper()
+            elif score_pattern.match(cell) and not entry["score"]:
+                entry["score"] = cell.replace(",", ".")
+            elif re.match(r"^[A-Z]{2,10}\d{3,5}$", cell):
+                entry["code"] = cell
+            elif re.match(r"^\d{1,2}$", cell) and not entry["credit"]:
+                entry["credit"] = cell
+            elif not entry["name"] and len(cell) > 3:
+                entry["name"] = cell
+
+        return entry if entry["name"] else None
+
+    def _parse_nilai_text(self, text):
+        """Try to parse a grade entry from free text."""
+        grade_pattern = re.compile(r"\b([A-Da-d][+-]?|E)\b")
+        score_pattern = re.compile(r"(\d{1,3}([.,]\d+)?)")
+        grades_found = grade_pattern.findall(text)
+        scores_found = score_pattern.findall(text)
+
+        if not grades_found and not scores_found:
+            return None
+
+        entry = {"name": "", "code": "", "credit": "", "grade": "", "score": ""}
+        code_match = re.search(r"[A-Z]{2,10}\d{3,5}", text)
+        if code_match:
+            entry["code"] = code_match.group()
+
+        if grades_found:
+            entry["grade"] = grades_found[0].upper()
+        if scores_found:
+            entry["score"] = scores_found[0][0].replace(",", ".")
+
+        # Extract course name: remove codes, grades, scores
+        remainder = text
+        if code_match:
+            remainder = remainder[:code_match.start()] + remainder[code_match.end():]
+        for g in grades_found:
+            remainder = re.sub(r"\b" + re.escape(g) + r"\b", "", remainder)
+        for s in scores_found:
+            remainder = remainder.replace(s[0], "")
+        remainder = re.sub(r"\s+", " ", remainder).strip("- ")
+        entry["name"] = remainder[:100] if remainder else ""
+
+        return entry if entry["name"] else None
+
+    def _save_grades(self, grades):
+        """Save nilai to data/bima_grades.json."""
+        try:
+            _ensure_dir()
+            with open(GRADES_FILE, "w") as f:
+                json.dump(grades, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Failed to save grades: {e}")
+
+
+# ── Convenience functions ──────────────────────────────────────
+
+def load_bima_jadwal() -> list:
+    """Load cached jadwal from data/bima_schedule.json."""
+    if os.path.exists(SCHEDULE_FILE):
+        try:
+            with open(SCHEDULE_FILE, "r") as f:
+                return json.load(f)
         except Exception:
             pass
-        self._page = None
+    return []
 
-    def _human_delay(self, min_s=0.5, max_s=2.0):
-        """Random human-like delay."""
-        time.sleep(random.uniform(min_s, max_s))
 
-    def _human_type(self, element, text: str):
-        """Type text character by character with random delays (human-like)."""
-        for char in text:
-            element.input(char)
-            time.sleep(random.uniform(0.05, 0.15))
-
-    def _human_scroll(self):
-        """Random small scroll to simulate human behavior."""
-        scroll_amount = random.randint(50, 200)
-        self._page.scroll.down(scroll_amount)
-        self._human_delay(0.3, 0.8)
-
-    def _find_frame(self, url_pattern: str):
-        """Find a DrissionPage frame object by URL pattern.
-
-        page.ele('css:iframe[...]') returns a raw HTML element — you cannot
-        .ele() inside it to access the frame's document.  get_frames()
-        returns frame objects that DO support .ele() for inner content.
-        """
-        for frame in self._page.get_frames():
-            src = frame.attr("src") or ""
-            if url_pattern in src:
-                return frame
-        return None
-
-    def _solve_recaptcha(self) -> bool:
-        """Attempt to solve reCAPTCHA v2 using DrissionPage.
-
-        DrissionPage uses CDP directly (not WebDriver), so reCAPTCHA
-        is much less likely to detect automation. The checkbox click
-        often passes without showing a challenge.
-
-        Returns True if solved, False if challenge appeared.
-        """
+def load_bima_nilai() -> list:
+    """Load cached nilai from data/bima_grades.json."""
+    if os.path.exists(GRADES_FILE):
         try:
-            # Wait for reCAPTCHA iframe to load
-            self._human_delay(1, 2)
-
-            # Find the reCAPTCHA anchor iframe via get_frames()
-            # (page.ele returns raw element; get_frames returns frame objects)
-            anchor_iframe = self._find_frame("recaptcha/api2/anchor")
-
-            if not anchor_iframe:
-                logger.warning("reCAPTCHA anchor iframe not found")
-                return False
-
-            # Find the checkbox inside the anchor frame
-            checkbox = anchor_iframe.ele("id:recaptcha-anchor", timeout=5)
-            if not checkbox:
-                logger.warning("reCAPTCHA checkbox not found inside iframe")
-                return False
-
-            self._human_delay(0.5, 1)
-            checkbox.click()
-            logger.info("Clicked reCAPTCHA checkbox")
-
-            # Wait for reCAPTCHA to process
-            self._human_delay(3, 5)
-
-            # Check if solved (checkbox gets aria-checked=true)
-            try:
-                anchor = anchor_iframe.ele("id:recaptcha-anchor", timeout=3)
-                if anchor:
-                    aria = anchor.attr("aria-checked") or ""
-                    if aria == "true":
-                        logger.info("reCAPTCHA solved (checkbox checked)")
-                        return True
-            except Exception:
-                pass
-
-            # Check if challenge appeared (bframe)
-            challenge_frame = self._find_frame("recaptcha/api2/bframe")
-            if challenge_frame:
-                try:
-                    challenge_frame.ele(
-                        "css:.rc-imageselect-desc-no-canonical", timeout=3
-                    )
-                    logger.warning("reCAPTCHA challenge appeared — cannot auto-solve")
-                    return False
-                except Exception:
-                    pass
-
-            # No challenge detected — might be solved or still processing
-            logger.info("No challenge detected, proceeding")
-            return True
-
-        except Exception as e:
-            logger.error(f"reCAPTCHA interaction failed: {e}")
-            return False
-
-    def login(self) -> bool:
-        """Login to BIMA with reCAPTCHA v2 handling."""
-        try:
-            self._start_browser()
-
-            # Try loading saved cookies first
-            if self._load_cookies():
-                self._page.get(BIMA_BASE_URL)
-                self._human_delay(2, 3)
-                if "/login" not in self._page.url:
-                    logger.info("BIMA session restored from cookies")
-                    self.logged_in = True
-                    return True
-                logger.info("BIMA cookies expired, logging in again")
-
-            # Load login page
-            self._page.get(BIMA_LOGIN_URL)
-            self._human_delay(2, 3)
-
-            # Human-like scroll
-            self._human_scroll()
-
-            # Extract CSRF token
-            csrf_input = self._page.ele("name:_token", timeout=5)
-            csrf_token = csrf_input.val if csrf_input else ""
-            logger.info(f"Got CSRF token: {csrf_token[:10]}...")
-
-            # Fill credentials with human-like typing
-            username_input = self._page.ele("name:username", timeout=5)
-            password_input = self._page.ele("name:password", timeout=5)
-
-            # Try multiple selector strategies for username/password
-            username_input = self._page.ele("name:username", timeout=5)
-            if not username_input:
-                username_input = self._page.ele("css:input#username", timeout=3)
-            if not username_input:
-                username_input = self._page.ele("css:input[name='username']", timeout=3)
-
-            password_input = self._page.ele("name:password", timeout=5)
-            if not password_input:
-                password_input = self._page.ele("css:input#password", timeout=3)
-            if not password_input:
-                password_input = self._page.ele("css:input[name='password']", timeout=3)
-
-            if username_input and password_input:
-                username_input.click()
-                self._human_delay(0.3, 0.5)
-                self._human_type(username_input, self.username)
-
-                self._human_delay(0.5, 1)
-
-                password_input.click()
-                self._human_delay(0.3, 0.5)
-                self._human_type(password_input, self.password)
-
-                logger.info("Filled credentials")
-            else:
-                # Debug: dump page state
-                logger.error("Login form inputs not found")
-                logger.error(f"  URL: {self._page.url}")
-                all_inputs = self._page.eles("tag:input")
-                logger.error(f"  Total inputs on page: {len(all_inputs)}")
-                for inp in all_inputs:
-                    logger.error(f"    name={inp.attr('name')} type={inp.attr('type')} id={inp.attr('id')}")
-                try:
-                    self._page.get_screenshot(path="/tmp/bima_form_debug.png", full_page=True)
-                    logger.error("  Screenshot saved to /tmp/bima_form_debug.png")
-                except Exception:
-                    pass
-                return False
-
-            # Small delay before reCAPTCHA
-            self._human_delay(1, 2)
-
-            # Solve reCAPTCHA
-            recaptcha_solved = self._solve_recaptcha()
-            if not recaptcha_solved:
-                logger.warning("reCAPTCHA not solved, trying to submit anyway")
-
-            # Human delay before submit
-            self._human_delay(0.5, 1)
-
-            # Click submit button
-            submit = self._page.ele("css:button[type='submit'], input[type='submit'], .btn-primary", timeout=5)
-            if submit:
-                submit.click()
-                logger.info("Clicked submit")
-            else:
-                # Fallback: submit form via JS
-                self._page.run_js("document.querySelector('form').submit()")
-                logger.info("Submitted form via JS")
-
-            # Wait for navigation
-            self._human_delay(3, 5)
-
-            # Check if login succeeded
-            if "/login" in self._page.url:
-                logger.error("Login failed — still on login page")
-                try:
-                    error_el = self._page.ele("css:.alert-danger, .error, .invalid-feedback", timeout=2)
-                    if error_el:
-                        logger.error(f"Error message: {error_el.text}")
-                except Exception:
-                    pass
-                return False
-
-            logger.info("BIMA login successful!")
-            self.logged_in = True
-            self._save_cookies()
-            return True
-
-        except Exception as e:
-            logger.error(f"BIMA login error: {e}")
-            return False
-        finally:
-            self._stop_browser()
-
-    def get_semester_info(self) -> Optional[dict]:
-        """Scrape semester info from BIMA dashboard.
-
-        Returns dict with:
-          - semester_name: e.g. "2024/2025 Gasal"
-          - semester_id: e.g. "20241"
-          - raw_text: full text for debugging
-        """
-        if not self.logged_in:
-            if not self.login():
-                return None
-
-        try:
-            self._start_browser()
-
-            # Load cookies and navigate
-            if self._load_cookies():
-                self._page.get(BIMA_BASE_URL)
-                self._human_delay(2, 3)
-                if "/login" in self._page.url:
-                    self._stop_browser()
-                    self.logged_in = False
-                    if not self.login():
-                        return None
-                    self._start_browser()
-                    if self._load_cookies():
-                        self._page.get(BIMA_BASE_URL)
-                        self._human_delay(2, 3)
-            else:
-                self._stop_browser()
-                self.logged_in = False
-                if not self.login():
-                    return None
-                self._start_browser()
-                if self._load_cookies():
-                    self._page.get(BIMA_BASE_URL)
-                    self._human_delay(2, 3)
-
-            raw_text = self._page.html or ""
-            result = {}
-
-            # Pattern 1: semester dropdown
-            try:
-                semester_select = self._page.ele("css:select[name*='semester'], select[name*='periode'], #semester", timeout=3)
-                if semester_select:
-                    selected_val = semester_select.val
-                    result["semester_id"] = selected_val
-                    # Get selected option text
-                    selected_option = self._page.ele(f"css:select option[value='{selected_val}']", timeout=2)
-                    if selected_option:
-                        result["semester_name"] = selected_option.text.strip()
-                    # Get all options
-                    options = semester_select.eles("tag:option")
-                    result["available_semesters"] = [
-                        {"value": opt.attr("value"), "text": opt.text.strip()}
-                        for opt in options
-                    ]
-                    logger.info(f"Found semester: {result.get('semester_name')} (id={selected_val})")
-            except Exception as e:
-                logger.debug(f"No semester dropdown found: {e}")
-
-            # Pattern 2: semester text in page
-            if not result.get("semester_name"):
-                patterns = [
-                    r"(?:Semester|Periode)\s*[:\s]*([\d]{4}[\s/\-]?[\d]?[\s]*(?:Ganjil|Genap|Gasal|Gelombang\s*\d))",
-                    r"(?:Semester|Periode)\s*[:\s]*([\d]{4}[0-9])",
-                    r"((?:20\d{2}|21\d{2})[/\-]?\d{0,2}\s*(?:Ganjil|Genap|Gasal))",
-                    r"(Semester\s+\w+)",
-                ]
-                for pat in patterns:
-                    m = re.search(pat, raw_text, re.IGNORECASE)
-                    if m:
-                        result["semester_name"] = m.group(1).strip()
-                        logger.info(f"Found semester in text: {result['semester_name']}")
-                        break
-
-            # Pattern 3: active period element
-            if not result.get("semester_name"):
-                try:
-                    period_el = self._page.ele("css:.period, .semester, .periode, [class*='semester'], [class*='periode']", timeout=3)
-                    if period_el:
-                        result["semester_name"] = period_el.text.strip()
-                        logger.info(f"Found period element: {result['semester_name']}")
-                except Exception:
-                    pass
-
-            if result.get("semester_name") or result.get("semester_id"):
-                result["raw_text"] = raw_text[:2000]
-                return result
-
-            logger.warning("Could not find semester info on BIMA")
-            logger.debug(f"Page text preview: {raw_text[:500]}")
-            return {"semester_name": "", "semester_id": "", "raw_text": raw_text[:2000]}
-
-        except Exception as e:
-            logger.error(f"BIMA semester scrape error: {e}")
-            return None
-        finally:
-            self._stop_browser()
-
-    def get_courses(self) -> list[dict]:
-        """Scrape enrolled courses from BIMA dashboard for the active semester."""
-        if not self.logged_in:
-            if not self.login():
-                return []
-
-        try:
-            self._start_browser()
-
-            if self._load_cookies():
-                self._page.get(BIMA_BASE_URL)
-                self._human_delay(2, 3)
-            else:
-                self._stop_browser()
-                self.logged_in = False
-                if not self.login():
-                    return []
-                self._start_browser()
-                if self._load_cookies():
-                    self._page.get(BIMA_BASE_URL)
-                    self._human_delay(2, 3)
-
-            raw_text = self._page.html or ""
-            courses = []
-            seen = set()
-
-            # Strategy 1: look for course cards/links on dashboard
-            course_selectors = [
-                "css:a[href*='course']",
-                "css:.card a",
-                "css:.panel a",
-                "css:table a[href*='matkul']",
-                "css:.list-group-item a",
-                "css:a[href*='matakuliah']",
-                "css:[class*='course'] a",
-            ]
-            for sel in course_selectors:
-                try:
-                    links = self._page.eles(sel, timeout=2)
-                    for link in links:
-                        text = link.text.strip()
-                        href = link.attr("href") or ""
-                        if text and len(text) > 3 and text not in seen:
-                            seen.add(text)
-                            cid_match = re.search(r'id[=/](\d+)', href)
-                            courses.append({
-                                "name": text,
-                                "id": cid_match.group(1) if cid_match else "",
-                            })
-                except Exception:
-                    continue
-
-            # Strategy 2: parse course names from raw text
-            if not courses:
-                for line in raw_text.split('\n'):
-                    line = line.strip()
-                    if len(line) > 5 and any(kw in line.lower() for kw in ['praktikum', 'kuliah', 'matakuliah', 'matkul']):
-                        if line not in seen:
-                            seen.add(line)
-                            courses.append({"name": line, "id": ""})
-
-            logger.info(f"Found {len(courses)} courses on BIMA dashboard")
-            return courses
-
-        except Exception as e:
-            logger.error(f"BIMA courses scrape error: {e}")
-            return []
-        finally:
-            self._stop_browser()
-
-
-def detect_semester_from_bima(username: str, password: str) -> Optional[str]:
-    """Convenience function: login to BIMA and return current semester name."""
-    scraper = BimaScraper(username, password)
-    info = scraper.get_semester_info()
-    if info and info.get("semester_name"):
-        return info["semester_name"]
-    return None
+            with open(GRADES_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []

@@ -22,7 +22,10 @@ from web.pairing import (
     generate_qr_png,
     cleanup_expired,
 )
-from web.data_reader import read_session, read_tracker, get_bot_status
+from web.data_reader import (
+    read_session, read_tracker, get_bot_status,
+    read_bima_schedule, read_bima_grades, is_bima_connected,
+)
 
 app = FastAPI(title="SPADA Bot Dashboard")
 
@@ -220,39 +223,54 @@ async def dashboard_page(request: Request):
     pending = status["assignments_pending"]
     submitted = status["assignments_submitted"]
     grades_count = status["grades_count"]
+    bima_connected = status["bima_connected"]
+    bima_jadwal_count = status["bima_jadwal_count"]
+    bima_nilai_count = status["bima_nilai_count"]
 
     body = f'''
     <h1 class="page-title">Dashboard</h1>
     <div class="grid">
-      <div class="stat-card"><div class="label">Status Login</div><div class="value {"green" if status["logged_in"] else "red"}">{"Online" if status["logged_in"] else "Offline"}</div></div>
+      <div class="stat-card"><div class="label">SPADA</div><div class="value {"green" if status["logged_in"] else "red"}">{"Online" if status["logged_in"] else "Offline"}</div></div>
+      <div class="stat-card"><div class="label">BIMA</div><div class="value {"green" if bima_connected else "red"}">{"Connected" if bima_connected else "Offline"}</div></div>
       <div class="stat-card"><div class="label">Semester</div><div class="value accent">{status["semester"] or "-"}</div></div>
       <div class="stat-card"><div class="label">Mata Kuliah</div><div class="value">{courses_count}</div></div>
       <div class="stat-card"><div class="label">Tugas Pending</div><div class="value {"yellow" if pending > 0 else "green"}">{pending}</div></div>
       <div class="stat-card"><div class="label">Sudah Submit</div><div class="value green">{submitted}</div></div>
-      <div class="stat-card"><div class="label">Nilai Tercatat</div><div class="value accent">{grades_count}</div></div>
+      <div class="stat-card"><div class="label">Nilai</div><div class="value accent">{grades_count}</div></div>
+      <div class="stat-card"><div class="label">BIMA Jadwal</div><div class="value accent">{bima_jadwal_count}</div></div>
     </div>
     '''
-    # Today's schedule
+    # Today's schedule — merge manual + BIMA
     schedule = session.get("course_schedule", {})
-    if schedule:
-        today_name = datetime.now().strftime("%A")
-        today_map = {"Monday": "Senin", "Tuesday": "Selasa", "Wednesday": "Rabu",
-                     "Thursday": "Kamis", "Friday": "Jumat", "Saturday": "Sabtu", "Sunday": "Minggu"}
-        today_id = today_map.get(today_name, "")
-        today_classes = [(name, info) for name, info in schedule.items() if info.get("day") == today_id]
+    today_name = datetime.now().strftime("%A")
+    today_map = {"Monday": "Senin", "Tuesday": "Selasa", "Wednesday": "Rabu",
+                 "Thursday": "Kamis", "Friday": "Jumat", "Saturday": "Sabtu", "Sunday": "Minggu"}
+    today_id = today_map.get(today_name, "")
+    today_classes: list[dict] = []
+    for name, info in schedule.items():
+        if info.get("day") == today_id:
+            today_classes.append({"name": name, "time": f"{info.get('start','')}-{info.get('end','')}", "room": info.get("room",""), "source": "Manual"})
+    bima_sched = read_bima_schedule()
+    for j in bima_sched:
+        if j.get("day") == today_id:
+            today_classes.append({"name": j.get("name","?"), "time": j.get("time",""), "room": j.get("room",""), "source": "BIMA"})
 
-        body += '<div class="section"><h2>Jadwal Hari Ini</h2>'
-        if today_classes:
-            body += '<div class="list">'
-            for name, info in sorted(today_classes, key=lambda x: x[1].get("start", "")):
-                body += f'''<div class="list-item">
-                  <div class="item-main"><span class="item-title">{name}</span>
-                  <span class="item-meta">{info.get("start","")}-{info.get("end","")}</span></div>
-                  <span class="item-tag">{info.get("room","")}</span></div>'''
-            body += '</div>'
-        else:
-            body += '<p class="empty">Tidak ada kelas hari ini.</p>'
+    body += '<div class="section"><h2>Jadwal Hari Ini</h2>'
+    if today_classes:
+        body += '<div class="list">'
+        for c in sorted(today_classes, key=lambda x: x.get("time", "")):
+            src_cls = "tag-green" if c["source"] == "BIMA" else ""
+            body += f'''<div class="list-item">
+              <div class="item-main"><span class="item-title">{c["name"]}</span>
+              <span class="item-meta">{c["time"]}</span></div>
+              <div class="item-right">
+                <span class="item-tag {src_cls}">{c["source"]}</span>
+                <span class="item-tag">{c["room"]}</span>
+              </div></div>'''
         body += '</div>'
+    else:
+        body += '<p class="empty">Tidak ada kelas hari ini.</p>'
+    body += '</div>'
 
     # Pending assignments
     assignments = tracker.get("assignments", [])
@@ -288,18 +306,40 @@ async def jadwal_page(request: Request):
 
     session = read_session()
     schedule = session.get("course_schedule", {})
+    bima_jadwal = read_bima_schedule()
 
     body = '<h1 class="page-title">Jadwal Kuliah</h1>'
 
-    if not schedule:
-        body += '<p class="empty">Belum ada jadwal. Gunakan /setjadwal di Telegram.</p>'
+    has_data = schedule or bima_jadwal
+    if not has_data:
+        body += '<p class="empty">Belum ada jadwal. Gunakan /setjadwal atau /bima di Telegram.</p>'
         return HTMLResponse(_page("jadwal", body, "Jadwal"))
 
-    # Group by day
+    # Group by day — merge manual + BIMA
     by_day: dict[str, list] = {}
+
+    # Manual schedule (course_schedule from session.json)
     for name, info in schedule.items():
         day = info.get("day", "Lainnya")
-        by_day.setdefault(day, []).append((name, info))
+        by_day.setdefault(day, []).append({
+            "name": name,
+            "time": f"{info.get('start','')}-{info.get('end','')}" if info.get("start") else "",
+            "room": info.get("room", ""),
+            "dosen": info.get("dosen", ""),
+            "source": "Manual",
+        })
+
+    # BIMA schedule
+    for j in bima_jadwal:
+        day = j.get("day", "Lainnya")
+        name = j.get("name", "?")
+        by_day.setdefault(day, []).append({
+            "name": name,
+            "time": j.get("time", ""),
+            "room": j.get("room", ""),
+            "dosen": j.get("dosen", ""),
+            "source": "BIMA",
+        })
 
     body += '<div class="sections">'
     for day in WEEKDAYS_ORDER:
@@ -307,13 +347,16 @@ async def jadwal_page(request: Request):
         if not classes:
             continue
         body += f'<div class="section"><h2>{day}</h2><div class="list">'
-        for name, info in sorted(classes, key=lambda x: x[1].get("start", "")):
+        for c in sorted(classes, key=lambda x: x.get("time", "")):
+            src = c["source"]
+            src_cls = "tag-green" if src == "BIMA" else ""
             body += f'''<div class="list-item">
-              <div class="item-main"><span class="item-title">{name}</span>
-              <span class="item-meta">{info.get("start","")}-{info.get("end","")}</span></div>
+              <div class="item-main"><span class="item-title">{c["name"]}</span>
+              <span class="item-meta">{c["time"]}</span></div>
               <div class="item-right">
-                <span class="item-tag">{info.get("room","")}</span>
-                <span class="item-meta">{info.get("dosen","")}</span>
+                <span class="item-tag {src_cls}">{src}</span>
+                <span class="item-tag">{c["room"]}</span>
+                <span class="item-meta">{c["dosen"]}</span>
               </div></div>'''
         body += '</div></div>'
     body += '</div>'
@@ -371,32 +414,59 @@ async def nilai_page(request: Request):
 
     tracker = read_tracker()
     grades = tracker.get("grades", [])
+    bima_nilai = read_bima_grades()
 
     body = '<h1 class="page-title">Nilai</h1>'
 
-    if not grades:
-        body += '<p class="empty">Belum ada nilai tercatat. Gunakan /sync di Telegram.</p>'
+    has_data = grades or bima_nilai
+    if not has_data:
+        body += '<p class="empty">Belum ada nilai tercatat. Gunakan /sync atau /bima di Telegram.</p>'
         return HTMLResponse(_page("nilai", body, "Nilai"))
 
-    body += '<div class="section"><h2>Daftar Nilai</h2><div class="list">'
-    for g in sorted(grades, key=lambda x: x.get("course", "")):
-        grade = g.get("grade", "-")
-        try:
-            gval = float(grade)
-            if gval >= 80:
-                tag_cls = "tag-green"
-            elif gval >= 60:
-                tag_cls = "tag-yellow"
-            else:
-                tag_cls = "tag-red"
-        except (ValueError, TypeError):
-            tag_cls = ""
+    # BIMA grades section (primary — more accurate)
+    if bima_nilai:
+        body += '<div class="section"><h2>📊 Nilai BIMA (Akademik)</h2><div class="list">'
+        for g in sorted(bima_nilai, key=lambda x: x.get("name", "")):
+            name = g.get("name", "?")
+            grade = g.get("grade", "-")
+            score = g.get("score", "")
+            display = grade if grade and grade != "-" else str(score) if score else "-"
+            try:
+                gval = float(display)
+                if gval >= 80:
+                    tag_cls = "tag-green"
+                elif gval >= 60:
+                    tag_cls = "tag-yellow"
+                else:
+                    tag_cls = "tag-red"
+            except (ValueError, TypeError):
+                tag_cls = ""
+            body += f'''<div class="list-item">
+              <div class="item-main"><span class="item-title">{name}</span>
+              <span class="item-meta">{g.get("status","")}</span></div>
+              <span class="item-tag {tag_cls}">{display}</span></div>'''
+        body += '</div></div>'
 
-        body += f'''<div class="list-item">
-          <div class="item-main"><span class="item-title">{g.get("course","")}</span>
-          <span class="item-meta">Updated: {(g.get("updated_at",""))[:10]}</span></div>
-          <span class="item-tag {tag_cls}">{grade}</span></div>'''
-    body += '</div></div>'
+    # SPADA grades section (supplementary)
+    if grades:
+        body += '<div class="section"><h2>📝 Nilai SPADA (Tugas)</h2><div class="list">'
+        for g in sorted(grades, key=lambda x: x.get("course", "")):
+            grade = g.get("grade", "-")
+            try:
+                gval = float(grade)
+                if gval >= 80:
+                    tag_cls = "tag-green"
+                elif gval >= 60:
+                    tag_cls = "tag-yellow"
+                else:
+                    tag_cls = "tag-red"
+            except (ValueError, TypeError):
+                tag_cls = ""
+            body += f'''<div class="list-item">
+              <div class="item-main"><span class="item-title">{g.get("course","")}</span>
+              <span class="item-meta">Updated: {(g.get("updated_at",""))[:10]}</span></div>
+              <span class="item-tag {tag_cls}">{grade}</span></div>'''
+        body += '</div></div>'
 
     return HTMLResponse(_page("nilai", body, "Nilai"))
 

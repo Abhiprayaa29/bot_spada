@@ -26,6 +26,7 @@ from store import (
     update_course_schedule_entry,
 )
 from spada import SpadaScraper
+from bima import BimaClient, load_bima_jadwal, load_bima_nilai
 from tracker import (
     add_assignment, mark_submitted, get_pending_assignments,
     get_submitted_assignments, get_all_assignments, get_submission_history,
@@ -70,8 +71,9 @@ def _require_login(update: Update) -> bool:
     return True
 
 
-# ── Conversation states for /login ───────────────────────────
+# ── Conversation states ─────────────────────────────────────
 LOGIN_USERNAME, LOGIN_PASSWORD = range(2)
+BIMA_AWAITING_COOKIES = 2
 
 
 # ============================================================
@@ -173,6 +175,165 @@ async def login_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ============================================================
+# /bima  — import BIMA cookies, sync jadwal + nilai
+# ============================================================
+
+def _get_bima() -> BimaClient:
+    """Create a BimaClient and load saved cookies."""
+    client = BimaClient()
+    client.load_cookies()
+    return client
+
+
+async def cmd_bima(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show BIMA status or start cookie import."""
+    client = _get_bima()
+    logged_in = client.is_logged_in()
+
+    if logged_in:
+        # Show status and options
+        name = client.get_dashboard_name()
+        jadwal = load_bima_jadwal()
+        nilai = load_bima_nilai()
+        lines = [
+            "✅ *BIMA Connected*\n",
+            f"👤 {name}" if name else "",
+            f"📅 Jadwal: *{len(jadwal)}* mata kuliah" if jadwal else "📅 Jadwal: belum sync",
+            f"📊 Nilai: *{len(nilai)}* mata kuliah" if nilai else "📊 Nilai: belum sync",
+            "",
+            "Ketik /bima refresh untuk sync ulang",
+            "Ketik /bima cookies untuk ganti cookies",
+        ]
+        await update.message.reply_text(
+            "\n".join(l for l in lines if l),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    else:
+        await update.message.reply_text(
+            "🔑 *BIMA belum terhubung*\n\n"
+            "Cara menghubungkan:\n"
+            "1. Buka https://bima.upnyk.ac.id di browser\n"
+            "2. Login manual (isi captcha)\n"
+            "3. Buka DevTools (F12) → Console\n"
+            "4. Copy cookie dari browser:\n"
+            "   • Firefox/Chrome: klik tab Application/Storage → Cookies\n"
+            "   • Atau ketik `document.cookie` di Console\n"
+            "5. Kirim cookie-nya ke sini\n\n"
+            "Format yang diterima:\n"
+            "• `name=value; name2=value2` (dari console)\n"
+            "• JSON array (dari extension export)\n"
+            "• Netscape format (tab-separated)\n\n"
+            "Ketik /bima cookies untuk mulai import",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+
+async def cmd_bima_cookies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start cookie import conversation."""
+    context.user_data["awaiting_bima_cookies"] = True
+    await update.message.reply_text(
+        "🍪 *Kirim cookie BIMA sekarang!*\n\n"
+        "Paste cookie dari browser kamu.\n"
+        "Ketik /cancel untuk batal.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return BIMA_AWAITING_COOKIES
+
+
+async def bima_receive_cookies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive and import BIMA cookies."""
+    if not context.user_data.get("awaiting_bima_cookies"):
+        return ConversationHandler.END
+
+    context.user_data["awaiting_bima_cookies"] = False
+    text = update.message.text.strip()
+
+    client = BimaClient()
+    count = client.import_cookies_string(text)
+
+    if count == 0:
+        await update.message.reply_text(
+            "❌ Cookie tidak bisa diparsed.\n"
+            "Pastikan format benar, coba lagi dengan /bima cookies"
+        )
+        return ConversationHandler.END
+
+    await update.message.reply_text(f"📥 Importing {count} cookies...")
+
+    # Verify login
+    if client.is_logged_in():
+        await update.message.reply_text("✅ BIMA terhubung! Sedang sync jadwal + nilai...")
+        # Auto-sync jadwal
+        jadwal = client.get_jadwal()
+        nilai = client.get_nilai()
+        lines = ["✅ *BIMA Sync Complete!*\n"]
+        if jadwal:
+            lines.append(f"📅 Jadwal: *{len(jadwal)}* mata kuliah")
+        else:
+            lines.append("⚠️ Jadwal tidak ditemukan (coba /bima refresh)")
+        if nilai:
+            lines.append(f"📊 Nilai: *{len(nilai)}* mata kuliah")
+        else:
+            lines.append("⚠️ Nilai tidak ditemukan (coba /bima refresh)")
+        await update.message.reply_text(
+            "\n".join(lines), parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Cookie tidak valid — BIMA masih redirect ke login.\n"
+            "Coba export ulang dari browser."
+        )
+
+    return ConversationHandler.END
+
+
+async def bima_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["awaiting_bima_cookies"] = False
+    await update.message.reply_text("Import dibatalkan.")
+    return ConversationHandler.END
+
+
+async def cmd_bima_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force refresh BIMA data (jadwal + nilai)."""
+    client = _get_bima()
+    if not client.is_logged_in():
+        await update.message.reply_text(
+            "❌ BIMA tidak terhubung. Ketik /bima untuk import cookies."
+        )
+        return
+
+    await update.message.reply_text("🔄 Syncing BIMA data...")
+    jadwal = client.get_jadwal()
+    nilai = client.get_nilai()
+
+    lines = ["✅ *BIMA Refresh Complete!*\n"]
+    if jadwal:
+        lines.append(f"📅 Jadwal: *{len(jadwal)}* mata kuliah")
+        for j in jadwal:
+            name = j.get("name", "?")
+            day = j.get("day", "")
+            time_ = j.get("time", "")
+            lines.append(f"  • {name} — {day} {time_}")
+    else:
+        lines.append("⚠️ Jadwal tidak ditemukan di BIMA")
+
+    if nilai:
+        lines.append(f"\n📊 Nilai: *{len(nilai)}* mata kuliah")
+        for n in nilai:
+            name = n.get("name", "?")
+            grade = n.get("grade", "-")
+            score = n.get("score", "")
+            display = f"{grade}" if grade and grade != "-" else f"{score}" if score else "-"
+            lines.append(f"  • {name}: {display}")
+    else:
+        lines.append("⚠️ Nilai tidak ditemukan di BIMA")
+
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode=ParseMode.MARKDOWN
+    )
+
+
 async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear stored credentials."""
     global _scraper
@@ -221,6 +382,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  /setjadwal — Input jadwal manual\n"
         f"  /setsemester — Set kode semester\n"
         f"  /listjadwal — Lihat jadwal tersimpan\n"
+        f"  /bima — Hubungkan BIMA (jadwal + nilai)\n"
         f"  /help — Bantuan\n\n"
         f"*Auto Features:*\n"
         f"  🌅 Daily briefing jam 7 pagi\n"
@@ -792,6 +954,28 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"\n🆕 *Nilai Baru:*")
             for g in new_grades:
                 lines.append(f"  📚 {g['course']}: {g['grade']}")
+
+        # Also sync BIMA if connected
+        bima_client = _get_bima()
+        if bima_client.is_logged_in():
+            lines.append(f"\n🔄 *Syncing BIMA...*")
+            bima_jadwal = bima_client.get_jadwal()
+            bima_nilai = bima_client.get_nilai()
+            if bima_jadwal:
+                lines.append(f"  📅 Jadwal BIMA: {len(bima_jadwal)} mata kuliah")
+                # Merge BIMA jadwal into course_schedule
+                schedule = get_course_schedule()
+                for j in bima_jadwal:
+                    name = j.get("name", "")
+                    if name and name not in schedule:
+                        schedule[name] = {
+                            "day": j.get("day", ""),
+                            "time": j.get("time", ""),
+                            "room": j.get("room", ""),
+                        }
+                save_course_schedule(schedule)
+            if bima_nilai:
+                lines.append(f"  📊 Nilai BIMA: {len(bima_nilai)} mata kuliah")
 
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
@@ -1539,6 +1723,20 @@ def main():
     app.add_handler(CommandHandler("setsemester", cmd_setsemester))
     app.add_handler(CommandHandler("listjadwal", cmd_listjadwal))
     app.add_handler(CommandHandler("semester", cmd_semester))
+    app.add_handler(CommandHandler("bima", cmd_bima))
+    app.add_handler(CommandHandler("bima-refresh", cmd_bima_refresh))
+
+    # ── BIMA cookie import conversation ───────────────────────
+    bima_handler = ConversationHandler(
+        entry_points=[CommandHandler("bima-cookies", cmd_bima_cookies)],
+        states={
+            BIMA_AWAITING_COOKIES: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, bima_receive_cookies),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", bima_cancel)],
+    )
+    app.add_handler(bima_handler)
 
     # Handle schedule paste after /setjadwal (must be before document handler)
     app.add_handler(MessageHandler(
