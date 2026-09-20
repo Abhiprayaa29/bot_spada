@@ -39,6 +39,7 @@ from tracker import (
     add_assignment, mark_submitted, get_pending_assignments,
     get_submitted_assignments, get_all_assignments, get_submission_history,
     update_grades, get_grades_snapshot, log_daily_summary, get_stats,
+    get_assignment_by_index, delete_assignment_by_index, edit_assignment_by_index,
 )
 
 # ── Logging ──────────────────────────────────────────────────
@@ -273,6 +274,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  /courses — Daftar mata kuliah\n"
         f"  /absen [nama] — Absen manual\n"
         f"  /tugas — Lihat semua tugas\n"
+        f"  /edittugas — Edit tugas\n"
+        f"  /hapustugas — Hapus tugas\n"
         f"  /briefing — Ringkasan harian\n"
         f"  /sync — Sync tracker dengan SPADA\n"
         f"  /status — Status bot\n"
@@ -304,6 +307,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/courses [semester] — Filter semester\n"
         f"  Contoh: /courses {sem}\n"
         "/tugas — Lihat semua tugas\n"
+        "/edittugas — Edit tugas (judul/matkul/deadline/status)\n"
+        "/hapustugas — Hapus tugas dari tracker\n"
         "/briefing — Ringkasan harian\n"
         "/sync — Sync tracker\n"
         "/status — Status bot\n"
@@ -731,6 +736,195 @@ async def cmd_tugas(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
+
+
+# ============================================================
+# /hapustugas — delete a tracked assignment
+# ============================================================
+
+async def cmd_hapustugas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete a task from the local tracker.
+
+    Usage:
+      /hapustugas          — list all tasks with numbers
+      /hapustugas 3        — delete task #3
+    """
+    all_a = get_all_assignments()
+
+    if not all_a:
+        await update.message.reply_text("📝 Tidak ada tugas yang ter-tracker.")
+        return
+
+    # No argument → show numbered list
+    if not context.args:
+        lines = [f"🗑️ *Hapus Tugas — Pilih nomor:*\n"]
+        for i, a in enumerate(all_a, 1):
+            emoji = "✅" if a.get("status") == "submitted" else "⏳"
+            title = a.get("title", "-")[:40]
+            course = a.get("course", "")[:25]
+            lines.append(f"{i}. {emoji} {title}")
+            lines.append(f"   📚 {course}")
+        lines.append(f"\nKetik: /hapustugas [nomor]")
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # Argument → delete by index
+    try:
+        idx = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Nomor tidak valid. Contoh: /hapustugas 3")
+        return
+
+    entry = get_assignment_by_index(idx)
+    if not entry:
+        await update.message.reply_text(
+            f"❌ Nomor {idx} tidak ditemukan.\n"
+            f"Total tugas: {len(all_a)}\n"
+            f"Ketik /hapustugas untuk melihat daftar."
+        )
+        return
+
+    deleted = delete_assignment_by_index(idx)
+    if deleted:
+        await update.message.reply_text(
+            f"🗑️ *Tugas dihapus:*\n\n"
+            f"📝 {deleted.get('title', '-')}\n"
+            f"📚 {deleted.get('course', '-')}\n"
+            f"📋 Status: {deleted.get('status', '-')}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    else:
+        await update.message.reply_text("❌ Gagal menghapus tugas.")
+
+
+# ============================================================
+# /edittugas — edit a tracked assignment
+# ============================================================
+
+async def cmd_edittugas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Edit a task in the local tracker.
+
+    Usage:
+      /edittugas                             — list all tasks with numbers
+      /edittugas 3                           — show task #3 details
+      /edittugas 3 judul=Judul Baru          — edit title
+      /edittugas 3 deadline=2026-10-01 23:59 — edit due date
+      /edittugas 3 matkul=Kriptografi        — edit course name
+      /edittugas 3 status=submitted          — mark as submitted
+    """
+    all_a = get_all_assignments()
+
+    if not all_a:
+        await update.message.reply_text("📝 Tidak ada tugas yang ter-tracker.")
+        return
+
+    # No argument → show numbered list
+    if not context.args:
+        lines = [f"✏️ *Edit Tugas — Pilih nomor:*\n"]
+        for i, a in enumerate(all_a, 1):
+            emoji = "✅" if a.get("status") == "submitted" else "⏳"
+            title = a.get("title", "-")[:40]
+            course = a.get("course", "")[:25]
+            lines.append(f"{i}. {emoji} {title}")
+            lines.append(f"   📚 {course}")
+        lines.append(f"\nKetik: /edittugas [nomor] [field=value]")
+        lines.append(f"Fields: judul, matkul, deadline, status")
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # First arg is index
+    try:
+        idx = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Nomor tidak valid. Contoh: /edittugas 3 judul=Judul Baru")
+        return
+
+    entry = get_assignment_by_index(idx)
+    if not entry:
+        await update.message.reply_text(
+            f"❌ Nomor {idx} tidak ditemukan.\n"
+            f"Total tugas: {len(all_a)}\n"
+            f"Ketik /edittugas untuk melihat daftar."
+        )
+        return
+
+    # No field args → show task details
+    if len(context.args) < 2:
+        status_icon = "✅" if entry.get("status") == "submitted" else "⏳"
+        lines = [
+            f"✏️ *Edit Tugas #{idx}:*\n",
+            f"📝 Judul: {entry.get('title', '-')}",
+            f"📚 Matkul: {entry.get('course', '-')}",
+            f"📋 Status: {status_icon} {entry.get('status', '-')}",
+            f"⏰ Deadline: {entry.get('due_date', '-')}",
+            f"🔗 URL: {entry.get('url', '-')[:50]}",
+            f"\n*Ubah field:*",
+            f"  /edittugas {idx} judul=Judul Baru",
+            f"  /edittugas {idx} matkul=Nama Matkul",
+            f"  /edittugas {idx} deadline=2026-10-01 23:59",
+            f"  /edittugas {idx} status=submitted",
+        ]
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # Parse field=value pairs from remaining args
+    raw = " ".join(context.args[1:])
+    # Split on known field prefixes
+    field_map = {}
+    for prefix, key in [
+        ("judul=", "title"),
+        ("matkul=", "course"),
+        ("deadline=", "due_date"),
+        ("status=", "status"),
+    ]:
+        idx_pos = raw.lower().find(prefix)
+        if idx_pos >= 0:
+            value = raw[idx_pos + len(prefix):].strip()
+            # For deadline, take everything until end of string
+            if key == "due_date":
+                value = value.strip()
+            if value:
+                field_map[key] = value
+
+    if not field_map:
+        await update.message.reply_text(
+            "❌ Tidak ada field yang diubah.\n\n"
+            "Format: /edittugas [nomor] judul=Judul Baru\n"
+            "Fields: judul, matkul, deadline, status"
+        )
+        return
+
+    # Validate status value
+    if "status" in field_map:
+        valid_statuses = {"pending", "submitted"}
+        if field_map["status"].lower() not in valid_statuses:
+            await update.message.reply_text(
+                f"❌ Status tidak valid: {field_map['status']}\n"
+                f"Valid: pending, submitted"
+            )
+            return
+        field_map["status"] = field_map["status"].lower()
+
+    updated = edit_assignment_by_index(idx, **field_map)
+    if updated:
+        # Build change description
+        changes = []
+        if "title" in field_map:
+            changes.append(f"📝 Judul: {field_map['title']}")
+        if "course" in field_map:
+            changes.append(f"📚 Matkul: {field_map['course']}")
+        if "due_date" in field_map:
+            changes.append(f"⏰ Deadline: {field_map['due_date']}")
+        if "status" in field_map:
+            emoji = "✅" if field_map["status"] == "submitted" else "⏳"
+            changes.append(f"📋 Status: {emoji} {field_map['status']}")
+
+        await update.message.reply_text(
+            f"✅ *Tugas #{idx} diperbarui:*\n\n" + "\n".join(changes),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    else:
+        await update.message.reply_text("❌ Gagal mengupdate tugas.")
 
 
 # ============================================================
@@ -1643,6 +1837,8 @@ def main():
     app.add_handler(CommandHandler("listjadwal", cmd_listjadwal))
     app.add_handler(CommandHandler("semester", cmd_semester))
     app.add_handler(CommandHandler("bima", cmd_bima))
+    app.add_handler(CommandHandler("edittugas", cmd_edittugas))
+    app.add_handler(CommandHandler("hapustugas", cmd_hapustugas))
 
     # Handle schedule paste after /setjadwal (must be before document handler)
     app.add_handler(MessageHandler(

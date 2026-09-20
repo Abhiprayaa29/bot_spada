@@ -166,6 +166,49 @@ def log_daily_summary(summary: str):
     _save(data)
 
 
+def get_assignment_by_index(index: int) -> Optional[dict]:
+    """Get assignment by 1-based index. Returns None if out of range."""
+    data = _load()
+    assignments = data["assignments"]
+    if 1 <= index <= len(assignments):
+        return assignments[index - 1]
+    return None
+
+
+def delete_assignment_by_index(index: int) -> Optional[dict]:
+    """Delete assignment by 1-based index. Returns the deleted entry or None."""
+    data = _load()
+    assignments = data["assignments"]
+    if 1 <= index <= len(assignments):
+        removed = assignments.pop(index - 1)
+        _save(data)
+        return removed
+    return None
+
+
+def edit_assignment_by_index(index: int, **fields) -> Optional[dict]:
+    """Edit assignment fields by 1-based index.
+    Supported fields: course, title, url, due_date, status.
+    Returns the updated entry or None."""
+    data = _load()
+    assignments = data["assignments"]
+    if not (1 <= index <= len(assignments)):
+        return None
+    a = assignments[index - 1]
+    allowed = {"course", "title", "url", "due_date", "status"}
+    changed = []
+    for key, val in fields.items():
+        if key in allowed and key in a:
+            old_val = a[key]
+            a[key] = val
+            if old_val != val:
+                changed.append(key)
+    if changed:
+        a["updated_at"] = datetime.now().isoformat()
+        _save(data)
+    return a
+
+
 def get_stats() -> dict:
     """Get overall stats."""
     data = _load()
