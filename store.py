@@ -41,9 +41,17 @@ def _load() -> dict:
 
 
 def _save(data: dict):
+    """Atomic write: write to temp file, then os.replace() to prevent corruption."""
+    import tempfile
     _ensure_dir()
-    with open(SESSION_FILE, "w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    fd, tmp_path = tempfile.mkstemp(dir=DATA_DIR, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, SESSION_FILE)
+    except Exception:
+        os.unlink(tmp_path)
+        raise
 
 
 # ── Credentials ──────────────────────────────────────────────
