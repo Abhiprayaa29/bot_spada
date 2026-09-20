@@ -806,11 +806,17 @@ SETJADWAL_WAITING = 0
 
 
 def _parse_schedule_input(text: str) -> list[dict]:
-    """Parse tab-separated schedule blocks pasted from SPADA.
+    """Parse tab-separated schedule blocks pasted from SPADA's kehadiran page.
 
-    Expected format per course (tabs between fields):
-        Kode\tNama\tKelas\tSKS\tHari Jam Start - Jam End Ruang\n
-        \nDosen\n\nKehadiran\n
+    Handles the actual SPADA format where each course block is:
+
+        Kurikulum[tab]Kode[tab]Nama[tab]Kelas[tab]SKS[tab]
+        Hari HH:MM - HH:MM Ruang
+        Dosen name(s)
+        Kehadiran_number
+
+    Header words (Kurikulum, Kode Mata Kuliah, etc.) are skipped.
+    The schedule line is the NEXT non-blank line after the tab row.
 
     Returns list of dicts with keys: code, name, kelas, sks, day, start, end, room, dosen.
     """
@@ -819,6 +825,13 @@ def _parse_schedule_input(text: str) -> list[dict]:
     courses = []
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = text.split("\n")
+
+    # Regex for schedule line: "Hari HH:MM - HH:MM Ruang"
+    sched_re = re.compile(
+        r"(Senin|Selasa|Rabu|Kamis|Jumat|Sabtu|Minggu)"
+        r"\s+(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*(.*)",
+        re.IGNORECASE,
+    )
 
     i = 0
     while i < len(lines):
@@ -829,77 +842,107 @@ def _parse_schedule_input(text: str) -> list[dict]:
             i += 1
             continue
 
-        # A header line contains tabs → parse it
-        if "\t" in line:
-            parts = [p.strip() for p in line.split("\t")]
-            # Filter out empty trailing tabs
-            parts = [p for p in parts if p]
+        # Only process lines that contain tabs (course data rows)
+        if "\t" not in line:
+            i += 1
+            continue
 
-            # We need at least: Kode, Nama, Kelas, SKS, Jadwal_text
-            # Some lines may have 5 parts (no schedule yet) or 6+ (schedule inline)
-            if len(parts) < 5:
-                i += 1
-                continue
+        parts = [p.strip() for p in line.split("\t")]
+        parts = [p for p in parts if p]
 
-            code = parts[0]    # e.g. "120210032"
-            name = parts[1]    # e.g. "Kapita Selekta"
-            kelas = parts[2]   # e.g. "IF-A"
-            sks_str = parts[3] # e.g. "2"
-            jadwal_text = parts[4]  # e.g. "Sabtu 07:30 - 09:15 Patt.I-3A"
+        # Need at least 5 fields: Kurikulum, Kode, Nama, Kelas, SKS
+        if len(parts) < 5:
+            i += 1
+            continue
 
-            sks = int(sks_str) if sks_str.isdigit() else 0
+        # SPADA format: Kurikulum | Kode | Nama | Kelas | SKS [| Jadwal_inline]
+        # parts[0]=kurikulum (IF21), parts[1]=kode (120210032), etc.
+        kurikulum = parts[0]
+        code = parts[1]
+        name = parts[2]
+        kelas = parts[3]
+        sks_str = parts[4]
+        sks = int(sks_str) if sks_str.isdigit() else 0
 
-            # Parse the schedule line: "Hari HH:MM - HH:MM Ruang"
-            day = ""
-            start_time = ""
-            end_time = ""
-            room = ""
+        # Check if schedule is inline (parts[5]) or on the next line
+        day = ""
+        start_time = ""
+        end_time = ""
+        room = ""
 
-            if jadwal_text:
-                # Pattern: Day HH:MM - HH:MM Room
-                m = re.match(
-                    r"(\w+)\s+(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*(.*)",
-                    jadwal_text,
-                )
-                if m:
-                    day = m.group(1).capitalize()
-                    start_time = m.group(2)
-                    end_time = m.group(3)
-                    room = m.group(4).strip()
+        jadwal_text = parts[5] if len(parts) > 5 else ""
+        m = sched_re.match(jadwal_text)
 
-            # Collect dosen lines (non-blank lines until next tab-line or end)
-            dosen_parts = []
+        if not m and jadwal_text:
+            # parts[5] exists but isn't a schedule — might be noise, skip
+            pass
+
+        if not m:
+            # Schedule is on the next non-blank line
             i += 1
             while i < len(lines):
-                next_line = lines[i].rstrip()
-                # Stop at next header (tab-separated) or blank line followed by header
-                if "\t" in next_line and any(
-                    p.strip() for p in next_line.split("\t")[:4]
-                ):
-                    break
-                # Stop at kehadiran number (single digit on its own line)
-                if next_line.strip().isdigit():
+                next_line = lines[i].strip()
+                if not next_line:
                     i += 1
-                    break
-                if next_line.strip():
-                    dosen_parts.append(next_line.strip())
-                i += 1
+                    continue
+                m = sched_re.match(next_line)
+                if m:
+                    i += 1  # consume the schedule line
+                break
 
-            dosen = ", ".join(dosen_parts) if dosen_parts else ""
-
-            courses.append({
-                "code": code,
-                "name": name,
-                "kelas": kelas,
-                "sks": sks,
-                "day": day,
-                "start": start_time,
-                "end": end_time,
-                "room": room,
-                "dosen": dosen,
-            })
+        if m:
+            day = m.group(1).capitalize()
+            start_time = m.group(2)
+            end_time = m.group(3)
+            room = m.group(4).strip()
+            i += 1 if not (jadwal_text and sched_re.match(jadwal_text)) else 0
         else:
             i += 1
+
+        # Collect dosen lines (non-blank, non-tab lines until kehadiran number)
+        dosen_parts = []
+        while i < len(lines):
+            next_line = lines[i].rstrip()
+            stripped = next_line.strip()
+
+            # Stop at next tab-separated course line
+            if "\t" in next_line:
+                break
+            # Stop at kehadiran number (just a digit)
+            if stripped.isdigit():
+                i += 1
+                break
+            # Stop at schedule-like line (shouldn't appear here, but safety)
+            if sched_re.match(stripped):
+                break
+            # Skip blank lines between dosen and kehadiran
+            if not stripped:
+                # Check if the line after blank is a number (kehadiran) or next course
+                j = i + 1
+                while j < len(lines) and not lines[j].strip():
+                    j += 1
+                if j < len(lines):
+                    ahead = lines[j].strip()
+                    if ahead.isdigit() or "\t" in lines[j]:
+                        break
+                i += 1
+                continue
+            dosen_parts.append(stripped)
+            i += 1
+
+        dosen = ", ".join(dosen_parts) if dosen_parts else ""
+
+        courses.append({
+            "code": code,
+            "name": name,
+            "kelas": kelas,
+            "sks": sks,
+            "day": day,
+            "start": start_time,
+            "end": end_time,
+            "room": room,
+            "dosen": dosen,
+        })
 
     return courses
 
