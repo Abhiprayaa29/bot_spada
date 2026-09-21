@@ -490,21 +490,34 @@ class SpadaScraper:
     def get_grades(self) -> list[dict]:
         """Get grades from the grade report."""
         self._ensure_login()
-        url = f"{self.base_url}/grade/report/mygrades.php"
-        resp = self.session.get(url, verify=False)
-        soup = BeautifulSoup(resp.text, "html.parser")
-
         grades = []
-        table = soup.select_one("table")
-        if table:
+        try:
+            url = f"{self.base_url}/grade/report/mygrades.php"
+            resp = self.session.get(url, verify=False)
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Try multiple table selectors — SPADA may use different layouts
+            table = (
+                soup.select_one("table.generaltable")
+                or soup.select_one("table.usergrades")
+                or soup.select_one("table#user-grades")
+                or soup.select_one("table")
+            )
+            if not table:
+                print("[SPADA] No grades table found on page")
+                return grades
+
             rows = table.find_all("tr")
             for row in rows:
                 cells = row.find_all("td")
                 if len(cells) >= 2:
                     course = cells[0].get_text(strip=True)
                     grade = cells[1].get_text(strip=True)
-                    if course and grade:
+                    # Skip header-like rows or empty rows
+                    if course and grade and course.lower() not in ("course", "mata kuliah", ""):
                         grades.append({"course": course, "grade": grade})
+        except Exception as e:
+            print(f"[SPADA] Error fetching grades: {e}")
 
         return grades
 

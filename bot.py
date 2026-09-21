@@ -1032,7 +1032,31 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         scraper = _get_scraper()
         sem = get_current_semester()
-        assignments = scraper.get_assignments(semester=sem)
+
+        # Filter by user's jadwal — only sync courses in course_schedule
+        schedule = get_course_schedule()
+        bima_jadwal = load_bima_jadwal()
+        scheduled_names = set(schedule.keys())
+        for j in bima_jadwal:
+            name = j.get("name", "")
+            if name:
+                scheduled_names.add(name)
+
+        if not scheduled_names:
+            await update.message.reply_text(
+                "⚠️ Belum ada jadwal yang diinput.\n"
+                "Gunakan /setjadwal atau input via web dashboard dulu.\n"
+                "Sync dibatalkan agar tidak pull semua matkul."
+            )
+            return
+
+        # Get all assignments for semester, then filter to scheduled courses only
+        all_assignments = scraper.get_assignments(semester=sem)
+        assignments = [
+            a for a in all_assignments
+            if a["course"] in scheduled_names
+        ]
+
         count = 0
         submitted = 0
         pending = 0
@@ -1051,14 +1075,21 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pending += 1
 
-        grades = scraper.get_grades()
-        new_grades = update_grades(grades)
+        # Grades — wrapped in try/except since grade page may vary
+        try:
+            grades = scraper.get_grades()
+            new_grades = update_grades(grades)
+        except Exception as ge:
+            print(f"[SYNC] Grades fetch failed: {ge}")
+            grades = []
+            new_grades = []
 
         stats = get_stats()
         lines = [
             f"✅ *Sync Complete!*\n",
             f"🎒 Semester: {sem}",
-            f"📝 Total tracked: {count} assignments",
+            f"📋 Jadwal: *{len(scheduled_names)}* mata kuliah",
+            f"📝 Tugas synced: {count}",
             f"📊 Grades: {stats['grades_count']}",
             f"✅ Submitted: {submitted}",
             f"⏳ Pending: {pending}",
@@ -1070,11 +1101,9 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"  📚 {g['course']}: {g['grade']}")
 
         # Also sync BIMA schedule from local JSON
-        bima_jadwal = load_bima_jadwal()
         if bima_jadwal:
             lines.append(f"\nBIMA Jadwal: *{len(bima_jadwal)}* mata kuliah")
             # Merge BIMA jadwal into course_schedule
-            schedule = get_course_schedule()
             for j in bima_jadwal:
                 name = j.get("name", "")
                 if name and name not in schedule:
