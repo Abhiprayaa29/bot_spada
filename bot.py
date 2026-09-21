@@ -19,7 +19,8 @@ from telegram.constants import ParseMode
 
 from config import config
 from store import (
-    has_credentials, save_credentials, clear_credentials,
+    has_credentials, get_credentials, save_credentials,
+    clear_credentials, clear_user_data,
     get_current_semester, save_current_semester,
     save_attendance_map, get_attendance_map,
     save_course_schedule, get_course_schedule,
@@ -132,6 +133,27 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Coba lagi dengan /login",
             )
             return ConversationHandler.END
+
+        # ── Clear old user data if credentials changed ─────────
+        old_user, _ = get_credentials()
+        if old_user and old_user != username:
+            await update.message.reply_text("🔄 Akun berbeda terdeteksi, menghapus data lama…")
+            clear_user_data()
+            # Clear bima_schedule.json
+            bima_path = os.path.join(os.path.dirname(__file__), "data", "bima_schedule.json")
+            try:
+                import json as _json
+                with open(bima_path, "w") as f:
+                    _json.dump([], f)
+            except Exception:
+                pass
+            # Clear tugas_tracker.json
+            tracker_path = os.path.join(os.path.dirname(__file__), "data", "tugas_tracker.json")
+            try:
+                with open(tracker_path, "w") as f:
+                    _json.dump({"assignments": [], "submissions": [], "grades": [], "daily_log": []}, f)
+            except Exception:
+                pass
 
         # ── Save credentials ──────────────────────────────────
         save_credentials(username, password)

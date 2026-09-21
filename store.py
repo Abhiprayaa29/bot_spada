@@ -80,6 +80,17 @@ def clear_credentials():
     _save(s)
 
 
+def clear_user_data():
+    """Clear all per-user data (jadwal, attendance, semester) on account switch."""
+    s = _load()
+    s["current_semester"] = ""
+    s["bima_semester"] = ""
+    s["bima_courses"] = []
+    s["attendance_map"] = {}
+    s["course_schedule"] = {}
+    _save(s)
+
+
 # ── Semester ─────────────────────────────────────────────────
 
 def get_current_semester() -> str:

@@ -14,12 +14,20 @@ def _ensure_data_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
 
 
+_DEFAULTS = {"assignments": [], "submissions": [], "grades": [], "daily_log": []}
+
+
 def _load() -> dict:
     _ensure_data_dir()
     if os.path.exists(TRACKER_FILE):
-        with open(TRACKER_FILE, "r") as f:
-            return json.load(f)
-    return {"assignments": [], "submissions": [], "grades": [], "daily_log": []}
+        try:
+            with open(TRACKER_FILE, "r") as f:
+                data = json.load(f)
+            # Merge with defaults so missing keys (grades, etc.) are always present
+            return {**_DEFAULTS, **data}
+        except (json.JSONDecodeError, IOError):
+            pass
+    return dict(_DEFAULTS)
 
 
 def _save(data: dict):
